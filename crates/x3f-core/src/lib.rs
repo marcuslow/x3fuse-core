@@ -149,6 +149,18 @@ pub struct ProcessOptions {
     /// Mapping applied to recovered DNG highlights (default: `Linear`).
     /// Ignored unless `dng_highlight_recovery` is enabled.
     pub dng_highlight_mapping: DngHighlightMapping,
+    /// Emit dual-illuminant camera profiles in DNG output (default: `true`).
+    ///
+    /// Quattro CAMF carries a per-preset colour-correction matrix and gain
+    /// triplet for every white-balance preset. With this enabled the DNG
+    /// writer derives `ColorMatrix1`/`ForwardMatrix1` from the Incandescent
+    /// preset tagged as Standard Illuminant A and `ColorMatrix2`/
+    /// `ForwardMatrix2` from the Overcast preset tagged as D65, so a DNG
+    /// reader interpolates the camera's own matrices by the scene's colour
+    /// temperature instead of reusing one matrix for every illuminant.
+    /// Disabled, or on bodies without both presets, the writer falls back
+    /// to the single as-shot matrix.
+    pub dng_dual_illuminant: bool,
     /// Cineon-style log TIFF mode. When `true`, the conversion pipeline:
     ///
     ///   - replaces the encoding-specific gamma LUT with a Cineon-style log
@@ -188,6 +200,7 @@ impl Default for ProcessOptions {
             opcodes_dir: None,
             dng_highlight_recovery: false,
             dng_highlight_mapping: DngHighlightMapping::default(),
+            dng_dual_illuminant: true,
             cineon: false,
         }
     }

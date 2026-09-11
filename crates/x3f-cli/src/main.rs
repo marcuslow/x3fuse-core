@@ -65,6 +65,7 @@ struct Args {
     matrix_max: Option<u32>,
     dng_highlight_recovery: bool,
     dng_highlight_mapping: DngHighlightMapping,
+    dng_dual_illuminant: bool,
     cineon: bool,
     /// Set when the user explicitly passed `-color <space>`. Used to
     /// resolve `-cineon` alone → ProPhotoRGB without overriding an
@@ -96,6 +97,7 @@ impl Default for Args {
             matrix_max: None,
             dng_highlight_recovery: false,
             dng_highlight_mapping: DngHighlightMapping::Linear,
+            dng_dual_illuminant: true,
             cineon: false,
             color_explicit: false,
         }
@@ -155,6 +157,11 @@ fn usage(progname: &str) -> ! {
          \x20                  have an effect. shoulder bakes the legacy soft\n\
          \x20                  shoulder into the raster; its knee is controlled\n\
          \x20                  by X3F_DNG_SHOULDER_KNEE (default 0.85).\n\
+         \x20  -dng-single-illuminant\n\
+         \x20                  Write one as-shot ColorMatrix/ForwardMatrix\n\
+         \x20                  instead of the Standard-A + D65 pair derived\n\
+         \x20                  from the camera's Incandescent and Overcast\n\
+         \x20                  presets (Quattro). Default: dual-illuminant.\n\
          \x20  -cineon         Write a 16-bit TIFF with a Cineon-style log tone\n\
          \x20                  curve (lifted shadows, pulled highlights, flat\n\
          \x20                  midtones) baked into the pixels and the Foveon\n\
@@ -308,6 +315,7 @@ fn parse_args(argv: &[String]) -> Args {
                 args.opcodes_dir = Some(PathBuf::from(v));
             }
             "-dng-highlight-recovery" => args.dng_highlight_recovery = true,
+            "-dng-single-illuminant" => args.dng_dual_illuminant = false,
             "-dng-highlight-mapping" => {
                 i += 1;
                 let v = argv
@@ -476,6 +484,7 @@ fn convert_one(infile: &Path, args: &Args) -> Result<(), String> {
         opcodes_dir: args.opcodes_dir.clone(),
         dng_highlight_recovery: args.dng_highlight_recovery,
         dng_highlight_mapping: args.dng_highlight_mapping,
+        dng_dual_illuminant: args.dng_dual_illuminant,
         cineon: args.cineon,
     };
 
@@ -580,7 +589,14 @@ mod tests {
         assert!(!a.compress);
         assert!(!a.dng_highlight_recovery);
         assert_eq!(a.dng_highlight_mapping, DngHighlightMapping::Linear);
+        assert!(a.dng_dual_illuminant);
         assert_eq!(a.files, vec![PathBuf::from("in.X3F")]);
+    }
+
+    #[test]
+    fn dng_single_illuminant_flag_disables_dual_profiles() {
+        let args = parse(&["-dng-single-illuminant", "in.X3F"]);
+        assert!(!args.dng_dual_illuminant);
     }
 
     #[test]

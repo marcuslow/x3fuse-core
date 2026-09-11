@@ -276,6 +276,35 @@ pub(crate) fn adobe_rgb_to_xyz() -> [f64; 9] {
     out
 }
 
+/// CIE XYZ of the D65 white point (Y = 1). Sigma's balanced-camera →
+/// XYZ matrices map a neutral to this by construction.
+pub(crate) const D65_XYZ: [f64; 3] = [0.95047, 1.00000, 1.08883];
+
+/// CIE XYZ of the D50 white point (Y = 1). DNG's profile connection space.
+pub(crate) const D50_XYZ: [f64; 3] = [0.96422, 1.00000, 0.82521];
+
+/// CIE XYZ of CIE Standard Illuminant A (2856 K, Y = 1): x = 0.44757,
+/// y = 0.40745.
+pub(crate) const STD_A_XYZ: [f64; 3] = [1.09850, 1.00000, 0.35585];
+
+pub(crate) fn mat3_mul_vec(a: &[f64; 9], v: &[f64; 3]) -> [f64; 3] {
+    std::array::from_fn(|r| (0..3).map(|c| a[3 * r + c] * v[c]).sum())
+}
+
+/// Bradford chromatic adaptation from `src_white` to `dst_white` (both CIE
+/// XYZ). Same construction as `x3f_Bradford_D65_to_D50` but for arbitrary
+/// white points, so the dual-illuminant profiles can move Sigma's
+/// D65-adapted matrices to Standard Illuminant A.
+pub(crate) fn bradford_adaptation(src_white: &[f64; 3], dst_white: &[f64; 3]) -> [f64; 9] {
+    const BRADFORD: [f64; 9] = [
+        0.8951, 0.2664, -0.1614, -0.7502, 1.7135, 0.0367, 0.0389, -0.0685, 1.0296,
+    ];
+    let src = mat3_mul_vec(&BRADFORD, src_white);
+    let dst = mat3_mul_vec(&BRADFORD, dst_white);
+    let scale = mat3_diag(&[dst[0] / src[0], dst[1] / src[1], dst[2] / src[2]]);
+    mat3_mul(&mat3_mul(&mat3_inverse(&BRADFORD), &scale), &BRADFORD)
+}
+
 /// 9 doubles → 9 floats (DNG matrix tags are SRATIONAL or FLOAT; we use
 /// FLOAT to match the C path's `TIFFSetField(..., 9, color_matrix1)`).
 pub(crate) fn mat3_to_f32(a: &[f64; 9]) -> [f32; 9] {
@@ -290,4 +319,36 @@ pub(crate) fn mat3_to_f32(a: &[f64; 9]) -> [f32; 9] {
         a[7] as f32,
         a[8] as f32,
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assert_close(actual: &[f64], expected: &[f64], tolerance: f64) {
+        for (i, (a, e)) in actual.iter().zip(expected).enumerate() {
+            assert!((a - e).abs() < tolerance, "entry {i}: {a} != {e}");
+        }
+    }
+
+    #[test]
+    fn bradford_adaptation_matches_the_legacy_d65_to_d50_matrix() {
+        assert_close(
+            &bradford_adaptation(&D65_XYZ, &D50_XYZ),
+            &bradford_d65_to_d50(),
+            2e-4,
+        );
+    }
+
+    #[test]
+    fn bradford_adaptation_maps_source_white_onto_destination_white() {
+        let to_a = bradford_adaptation(&D65_XYZ, &STD_A_XYZ);
+        assert_close(&mat3_mul_vec(&to_a, &D65_XYZ), &STD_A_XYZ, 1e-9);
+        let identity = bradford_adaptation(&D65_XYZ, &D65_XYZ);
+        assert_close(
+            &identity,
+            &[1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+            1e-12,
+        );
+    }
 }

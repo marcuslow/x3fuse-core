@@ -186,9 +186,13 @@ pub fn write(reader: &Reader, path: impl AsRef<Path>, opts: &ProcessOptions) -> 
     //    directly; everything else goes here as MMCR-prefixed mini-TIFFs).
     //    We write the blob ahead of IFD1 so its offsets are known when
     //    we build IFD0.
+    //    Dual-illuminant profiles are Quattro-only: Merrill's calibration
+    //    has not been validated in D65 coordinates (see
+    //    `add_dng_top_level_tags`), so it keeps the legacy single matrix.
+    let dual_illuminant = opts.dng_dual_illuminant && is_quattro(&capture_meta);
     let default_idx = profiles::default_profile_index(reader);
     let (extra_blob, extra_rel_offsets) =
-        build_extra_profiles_blob(reader, &wb, &calibration, default_idx)
+        build_extra_profiles_blob(reader, &wb, &calibration, default_idx, dual_illuminant)
             .ok_or(Error::Library(crate::LibraryError::Argument))?;
     let extra_offsets_abs: Vec<u32> = if extra_blob.is_empty() {
         Vec::new()
@@ -266,16 +270,22 @@ pub fn write(reader: &Reader, path: impl AsRef<Path>, opts: &ProcessOptions) -> 
     if let Some(off) = exif_subifd_offset {
         ifd0.add(tags::EXIF_IFD_POINTER, Value::Long(vec![off]));
     }
+    // The default profile decides whether the file is dual-illuminant
+    // (both CalibrationIlluminant tags come with it) or falls back to the
+    // single as-shot matrix (IFD0 then labels it D65 below).
+    let Some((_, dual_emitted)) =
+        write_default_profile(reader, &wb, &calibration, dual_illuminant, &mut ifd0)
+    else {
+        return Err(Error::Library(crate::LibraryError::Argument));
+    };
     add_dng_top_level_tags(
         reader,
         &capture_meta,
         &calibration,
         highlight_scale,
+        !dual_emitted,
         &mut ifd0,
     );
-    if write_default_profile(reader, &wb, &calibration, &mut ifd0).is_none() {
-        return Err(Error::Library(crate::LibraryError::Argument));
-    }
     if !extra_offsets_abs.is_empty() {
         ifd0.add(tags::EXTRA_CAMERA_PROFILES, Value::Long(extra_offsets_abs));
     }
@@ -506,11 +516,19 @@ fn crop_rationals(crop: [f32; 4]) -> Value {
     )
 }
 
+fn is_quattro(capture_meta: &exif::CaptureMetadata) -> bool {
+    capture_meta
+        .model
+        .as_deref()
+        .is_some_and(|model| model.to_ascii_lowercase().contains("quattro"))
+}
+
 fn add_dng_top_level_tags(
     reader: &Reader,
     capture_meta: &exif::CaptureMetadata,
     calibration: &ColorCalibration,
     highlight_scale: f64,
+    label_single_illuminant: bool,
     ifd: &mut DirectoryWriter,
 ) {
     // BaselineExposure = log2(capture_iso/sensor_iso)
@@ -555,17 +573,17 @@ fn add_dng_top_level_tags(
 
     // CameraCalibration defaults to identity. Its diagonal is folded into
     // every profile's ColorMatrix so readers that ignore it still agree.
-    // Quattro's ColorMatrix is derived in D65 XYZ coordinates. Label it
-    // accordingly so readers using ColorMatrix apply the correct chromatic
-    // adaptation. Other camera lines retain their existing omitted tag
-    // until their calibration has been validated.
-    if let Some(model) = capture_meta.model.as_deref() {
-        if model.to_ascii_lowercase().contains("quattro") {
-            ifd.add(
-                tags::CALIBRATION_ILLUMINANT1,
-                Value::Short(vec![tags::CALIB_ILLUMINANT_D65]),
-            );
-        }
+    // Quattro's single ColorMatrix is derived in D65 XYZ coordinates. Label
+    // it accordingly so readers using ColorMatrix apply the correct
+    // chromatic adaptation. Other camera lines retain their existing
+    // omitted tag until their calibration has been validated. A dual-
+    // illuminant default profile has already written both
+    // CalibrationIlluminant tags, so leave them alone in that case.
+    if label_single_illuminant && is_quattro(capture_meta) {
+        ifd.add(
+            tags::CALIBRATION_ILLUMINANT1,
+            Value::Short(vec![tags::CALIB_ILLUMINANT_D65]),
+        );
     }
 }
 

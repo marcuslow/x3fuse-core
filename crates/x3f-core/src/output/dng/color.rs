@@ -13,6 +13,7 @@ pub(super) struct ColorCalibration {
     pub(super) neutral: [f64; 3],
     pub(super) digital_gain_ev: f64,
     calibration_diagonal: [f64; 3],
+    relative_gain: [f64; 3],
 }
 
 impl ColorCalibration {
@@ -65,7 +66,21 @@ impl ColorCalibration {
             neutral,
             digital_gain_ev: mean.log2(),
             calibration_diagonal,
+            relative_gain,
         })
+    }
+
+    /// Camera-native neutral for an arbitrary preset gain triplet, in the
+    /// same frame as `neutral` (relative digital gain included). This is
+    /// what `AsShotNeutral` would be for a shot taken under that preset,
+    /// and therefore what a calibration illuminant's white must map to
+    /// through that illuminant's `ColorMatrix`.
+    pub(super) fn native_neutral(&self, gain: &[f64; 3]) -> Option<[f64; 3]> {
+        let neutral: [f64; 3] = std::array::from_fn(|i| 1.0 / (gain[i] * self.relative_gain[i]));
+        neutral
+            .iter()
+            .all(|value| value.is_finite() && *value > 0.0)
+            .then_some(neutral)
     }
 
     /// Absorb CameraCalibration into ColorMatrix, so readers need only the
@@ -199,6 +214,27 @@ mod tests {
                 mat3_mul(&forward, &mat3_diag(&neutral.map(|value| 1.0 / value)));
             assert_close(folded_transform, explicit_transform, 1e-12);
         }
+    }
+
+    #[test]
+    fn native_neutral_shares_the_as_shot_frame() {
+        let color =
+            ColorCalibration::from_gains(SHOT_GAIN, CALIBRATION_GAIN, [4.0, 4.0, 2.0]).unwrap();
+        assert_eq!(color.native_neutral(&SHOT_GAIN).unwrap(), color.neutral);
+        let reference = color.native_neutral(&CALIBRATION_GAIN).unwrap();
+        assert_close(
+            reference,
+            color
+                .fold_color_matrix(&[1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0])
+                .chunks(3)
+                .enumerate()
+                .map(|(i, row)| row[i])
+                .collect::<Vec<_>>()
+                .try_into()
+                .unwrap(),
+            1e-12,
+        );
+        assert!(color.native_neutral(&[0.0, 1.0, 1.0]).is_none());
     }
 
     #[test]
