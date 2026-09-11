@@ -260,13 +260,26 @@ const PROFILES: &[CameraProfile] = &[
 
 /// White-balance presets that stand in for the two DNG calibration
 /// illuminants. Sigma ships a colour-correction matrix and a gain triplet
-/// per preset; Incandescent is the body's tungsten calibration (Standard
-/// Illuminant A, 2856 K) and Overcast its daylight one (D65). These are
-/// also the two illuminants Adobe's own dual-illuminant profiles use, so
-/// readers interpolate between them by the scene's estimated colour
-/// temperature exactly as they do for any other camera.
-const ILLUMINANT_A_PRESET: &str = "Incandescent";
+/// per preset; Overcast is the body's daylight calibration (D65) and
+/// Incandescent its tungsten one (Standard Illuminant A, 2856 K). These are
+/// the two illuminants Adobe's own dual-illuminant profiles use, so readers
+/// interpolate between them by the scene's estimated colour temperature
+/// exactly as they do for any other camera.
+///
+/// Order matters for one reader. The DNG spec puts no meaning on which
+/// illuminant is "1" (Adobe's converter writes A first, and the DNG SDK and
+/// Apple RAW interpolate the same way in either order), but Capture One
+/// 15.3 initialises a DNG's white balance from `CalibrationIlluminant1` as
+/// if the picture had been taken under that light — the behaviour it needs
+/// for single-matrix files, whose writers set the tag to the shooting
+/// illuminant. With Standard A first it anchors the whole Kelvin scale on
+/// tungsten: daylight files import as "Custom" with tungsten multipliers
+/// (measured within 2–6% of the Incandescent gains) and turn blue as soon
+/// as the Kelvin slider moves. D65 first restores exactly the behaviour
+/// Capture One had with the legacy single D65 matrix, while dual-aware
+/// readers still see both anchors.
 const ILLUMINANT_D65_PRESET: &str = "Overcast";
+const ILLUMINANT_A_PRESET: &str = "Incandescent";
 
 /// One calibration illuminant's worth of DNG matrix tags.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -337,9 +350,10 @@ fn illuminant_matrices_from(
     }
 }
 
-/// Standard-A + D65 matrix pairs from the body's Incandescent and Overcast
-/// presets. `None` when either preset is missing its CCM or gains, in
-/// which case the caller falls back to the single as-shot matrix.
+/// D65 + Standard-A matrix pairs from the body's Overcast and Incandescent
+/// presets, D65 first (see the illuminant preset constants for why).
+/// `None` when either preset is missing its CCM or gains, in which case
+/// the caller falls back to the single as-shot matrix.
 fn dual_illuminant_matrices(
     reader: &Reader,
     calibration: &ColorCalibration,
@@ -355,12 +369,12 @@ fn dual_illuminant_matrices(
             illuminant,
         ))
     };
-    let first = anchor(
+    let first = anchor(ILLUMINANT_D65_PRESET, &D65_XYZ, t::CALIB_ILLUMINANT_D65)?;
+    let second = anchor(
         ILLUMINANT_A_PRESET,
         &STD_A_XYZ,
         t::CALIB_ILLUMINANT_STANDARD_A,
     )?;
-    let second = anchor(ILLUMINANT_D65_PRESET, &D65_XYZ, t::CALIB_ILLUMINANT_D65)?;
     Some(ProfileMatrices {
         first,
         second: Some(second),
@@ -1013,12 +1027,12 @@ mod tests {
             first: IlluminantMatrices {
                 color: [0.1_f32; 9],
                 forward: [0.2_f32; 9],
-                illuminant: t::CALIB_ILLUMINANT_STANDARD_A,
+                illuminant: t::CALIB_ILLUMINANT_D65,
             },
             second: Some(IlluminantMatrices {
                 color: [0.3_f32; 9],
                 forward: [0.4_f32; 9],
-                illuminant: t::CALIB_ILLUMINANT_D65,
+                illuminant: t::CALIB_ILLUMINANT_STANDARD_A,
             }),
         };
         let blob = build_mmcr_profile("Standard", &matrices, None, None);
@@ -1044,8 +1058,9 @@ mod tests {
             assert_eq!(e.2, 1);
             u16::from_be_bytes([e.3[0], e.3[1]])
         };
-        assert_eq!(illuminant(t::CALIBRATION_ILLUMINANT1), 17);
-        assert_eq!(illuminant(t::CALIBRATION_ILLUMINANT2), 21);
+        // D65 first: Capture One anchors its white balance on illuminant 1.
+        assert_eq!(illuminant(t::CALIBRATION_ILLUMINANT1), 21);
+        assert_eq!(illuminant(t::CALIBRATION_ILLUMINANT2), 17);
         // ColorMatrix2 payload decodes to its 0.3 entries.
         let cm2 = entries.iter().find(|e| e.0 == t::COLOR_MATRIX2).unwrap();
         let p = u32::from_be_bytes(cm2.3) as usize;

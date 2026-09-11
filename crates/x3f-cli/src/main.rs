@@ -159,8 +159,8 @@ fn usage(progname: &str) -> ! {
          \x20                  by X3F_DNG_SHOULDER_KNEE (default 0.85).\n\
          \x20  -dng-single-illuminant\n\
          \x20                  Write one as-shot ColorMatrix/ForwardMatrix\n\
-         \x20                  instead of the Standard-A + D65 pair derived\n\
-         \x20                  from the camera's Incandescent and Overcast\n\
+         \x20                  instead of the D65 + Standard-A pair derived\n\
+         \x20                  from the camera's Overcast and Incandescent\n\
          \x20                  presets (Quattro). Default: dual-illuminant.\n\
          \x20  -cineon         Write a 16-bit TIFF with a Cineon-style log tone\n\
          \x20                  curve (lifted shadows, pulled highlights, flat\n\
