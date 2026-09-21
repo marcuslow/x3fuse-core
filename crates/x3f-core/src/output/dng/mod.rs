@@ -4,8 +4,8 @@
 //!
 //! ```text
 //! TIFF header (II + magic + IFD0-offset)
-//! Preview strip bytes               (baseline JPEG from the camera's embedded JPEG,
-//!                                     ≤1600 px long edge; 8-bit RGB fallback, 300 px wide)
+//! Preview strip bytes               (8-bit RGB, 300 px wide; DP1X/DP2X/SD15: baseline JPEG
+//!                                     from the camera's embedded JPEG, ≤1600 px long edge)
 //! Raw strip bytes                    (16-bit RGB, full resolution; optional lossless JPEG)
 //! ExtraCameraProfiles blob           (concatenated MMCR mini-TIFFs)
 //! IFD1 (raw) — external values + body
@@ -122,14 +122,24 @@ pub fn write(reader: &Reader, path: impl AsRef<Path>, opts: &ProcessOptions) -> 
         .map(|(_, _, r, c)| (r, c))
         .unwrap_or((image.rows, image.columns));
 
-    // IFD0 preview: the camera's own JPEG rendering, downscaled (see
-    // `preview`). Viewers show this instead of rendering the raw plane at
-    // thumbnail sizes, so it has to look like the camera JPEG, not like a
-    // profile-less dump of the linear data. Fall back to the legacy raw-
-    // rendered strip only when the file has no decodable embedded JPEG.
-    let camera_preview = reader
-        .dng_thumb_jpeg_bytes()
-        .and_then(|jpeg| preview::from_camera_jpeg(&jpeg, preview::MAX_LONG_EDGE));
+    // Resolve required identity before the preview and the output file.
+    // Quattro stores Make/Model in JPEG EXIF rather than CAMF, so use the
+    // shared fallback.
+    let capture_meta = exif::CaptureMetadata::from_reader(reader);
+
+    // IFD0 preview. For the TRUE II bodies (DP1X, DP2X, SD15) it is the
+    // camera's own JPEG rendering, downscaled (see `preview`): viewers show
+    // the preview instead of rendering the raw plane at thumbnail sizes, and
+    // for those bodies the raw-rendered preview looked wrong. Every other
+    // camera keeps the legacy raw-rendered RGB strip, which is also the
+    // fallback when a TRUE II file has no decodable embedded JPEG.
+    let camera_preview = if preview::uses_camera_jpeg(capture_meta.model.as_deref()) {
+        reader
+            .dng_thumb_jpeg_bytes()
+            .and_then(|jpeg| preview::from_camera_jpeg(&jpeg, preview::MAX_LONG_EDGE))
+    } else {
+        None
+    };
     let preview = match camera_preview {
         Some(jpeg) => PreviewImage::Jpeg(jpeg),
         None => {
@@ -176,9 +186,6 @@ pub fn write(reader: &Reader, path: impl AsRef<Path>, opts: &ProcessOptions) -> 
     // `Image::dng_highlight_scale`.
     let highlight_scale = image.dng_highlight_scale;
 
-    // Resolve required identity before opening the output. Quattro stores
-    // Make/Model in JPEG EXIF rather than CAMF, so use the shared fallback.
-    let capture_meta = exif::CaptureMetadata::from_reader(reader);
     let unique_camera_model = capture_meta
         .unique_camera_model()
         .ok_or(Error::Library(crate::LibraryError::Argument))?;

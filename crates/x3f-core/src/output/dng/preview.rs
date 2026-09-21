@@ -62,6 +62,16 @@ impl PreviewImage {
     }
 }
 
+/// Whether `model` gets the camera-JPEG preview. Limited to the TRUE II
+/// bodies, whose raw-rendered preview looked flat and magenta; other cameras
+/// keep the legacy rendered preview.
+pub(crate) fn uses_camera_jpeg(model: Option<&str>) -> bool {
+    matches!(
+        model.map(str::trim),
+        Some("SIGMA DP1X") | Some("SIGMA DP2X") | Some("SIGMA SD15")
+    )
+}
+
 /// Build the IFD0 preview from the camera's embedded JPEG. Returns `None`
 /// when the stream cannot be decoded, in which case the caller falls back
 /// to the raw-rendered preview.
@@ -212,6 +222,25 @@ mod tests {
         let (out, w, h) = box_downsample(&rgb, 4, 2, 2);
         assert_eq!((w, h), (2, 1));
         assert_eq!(out, vec![10, 10, 10, 250, 250, 250]);
+    }
+
+    #[test]
+    fn only_true2_bodies_use_the_camera_jpeg() {
+        for m in ["SIGMA DP1X", "SIGMA DP2X", "SIGMA SD15", " SIGMA DP2X "] {
+            assert!(uses_camera_jpeg(Some(m)), "{m}");
+        }
+        for m in [
+            "SIGMA DP2",
+            "SIGMA DP1S",
+            "SIGMA SD14",
+            "SIGMA DP2 Merrill",
+            "SIGMA dp2 Quattro",
+            "SIGMA sd Quattro H",
+            "",
+        ] {
+            assert!(!uses_camera_jpeg(Some(m)), "{m}");
+        }
+        assert!(!uses_camera_jpeg(None));
     }
 
     #[test]
