@@ -33,6 +33,42 @@ the diffs small enough that parity-validation MD5s stay
 interpretable. Don't refactor adjacent code unless your change makes
 it dead.
 
+## Publishing the Rust libraries
+
+`x3f-sys` and `x3f-core` are published together at the workspace version.
+They require Rust 1.88 or newer, plus a C compiler and libclang for the
+remaining shims and bindgen. Multi-package publication requires
+[Cargo 1.90 or newer](https://doc.rust-lang.org/cargo/CHANGELOG.html#cargo-190-2025-09-18);
+the commands below were verified with Cargo 1.98.1.
+
+For a new version, `scripts/release.sh <version> --push` updates the
+workspace version and internal dependency requirements, copies the root
+`LICENSE` and `NOTICE` into both crates, runs the verification gates and a
+publication dry run, and opens the version-bump PR. Merge it first.
+The existing tag workflow publishes GitHub binaries; crates.io publication
+is a separate step from a clean checkout of the merged revision:
+
+```sh
+cargo login
+cargo publish --dry-run -p x3f-sys -p x3f-core
+cargo publish -p x3f-sys -p x3f-core
+```
+
+Cargo orders the packages by dependency, publishing `x3f-sys` before
+`x3f-core`. If publication stops after the first package succeeds, publish
+only the remaining package after checking its version on crates.io.
+Do not use `--no-verify`; the dry run compiles the packaged archives,
+including the headers and C shims shipped with `x3f-sys`.
+
+When changing license or attribution text outside a version bump, also
+refresh the regular files included in each crate before packaging:
+
+```sh
+for crate in x3f-sys x3f-core; do
+    cp LICENSE NOTICE "crates/$crate/"
+done
+```
+
 ## Port conventions
 
 A handful of conventions show up over and over in the milestone
@@ -62,10 +98,30 @@ Two layers of MD5 baselines, one automated and one manual:
 
 **Automated (tier-2,
 [`crates/x3f-cli/tests/tier2_md5.rs`](../../crates/x3f-cli/tests/tier2_md5.rs)):**
-metadata dumps, the embedded JPEG thumbnail, and PPM rasters are pinned
-to exact hashes. Processed TIFF/DNG output is deliberately *not* in
+metadata dumps and PPM rasters are pinned to exact hashes; the embedded JPEG
+is compared byte-for-byte with its declared source section payload.
+Processed TIFF/DNG output is deliberately *not* in
 tier-2 — it shifts whenever the highlight-recovery work iterates;
 tier-3 perceptual diffs cover it.
+
+The desktop-library refactor fixes a JPEG extraction overread: the section's
+28-byte header was counted again after the allocated image payload. Extraction
+now copies exactly `image_data.data_size`, preserving the complete embedded JPEG
+while omitting those 28 unrelated trailing bytes. JPEG file hashes intentionally
+change; decoded pixels and the actual JPEG payload do not. The previous JPEG
+hash assertions now compare the declared section payload directly; no replacement
+hashes were guessed for unavailable fixtures.
+
+For local camera fixtures, the desktop API's cancellation and concurrent-option
+checks can be run with:
+
+```sh
+X3F_TEST_FILES=/absolute/path/to/fixtures cargo test -p x3f-core --test conversion --release
+```
+
+Set `X3F_BASELINE_DIR` to outputs from the pre-change CLI (`-no-denoise -dng`
+and `-no-denoise -tiff`) to additionally compare default DNG and TIFF bytes.
+The tests use up to two sorted X3F files; include Merrill and Quattro examples.
 
 **Manual (run before merging anything that touches the pipeline):**
 three reference baselines, produced with

@@ -27,6 +27,8 @@
 //!   recovery, and `convert_data`.
 #![allow(clippy::missing_safety_doc)]
 
+use crate::Control;
+
 use std::ffi::CStr;
 use std::ptr;
 
@@ -957,6 +959,15 @@ pub unsafe extern "C" fn interpolate_bad_pixels(
     image: *mut x3f_area16_t,
     colors: libc::c_int,
 ) {
+    unsafe { interpolate_bad_pixels_controlled(x3f, image, colors, Control::none()) }
+}
+
+unsafe fn interpolate_bad_pixels_controlled(
+    x3f: *mut x3f_t,
+    image: *mut x3f_area16_t,
+    colors: libc::c_int,
+    control: Control<'_>,
+) {
     let img = unsafe { &*image };
     let cs = img.columns as i32;
     let rs = img.rows as i32;
@@ -1001,6 +1012,9 @@ pub unsafe extern "C" fn interpolate_bad_pixels(
             };
             if bp_ok {
                 for i in 0..bp_num as usize {
+                    if control.check().is_err() {
+                        return;
+                    }
                     let v = unsafe { *bp.add(i) };
                     let c = (((v & 0x000fff00) >> 8) as i32) - keep[0] as i32;
                     let r = (((v & 0xfff00000) >> 20) as i32) - keep[1] as i32;
@@ -1027,6 +1041,9 @@ pub unsafe extern "C" fn interpolate_bad_pixels(
         };
         if f20_ok {
             for row in 0..bpf20_rows as usize {
+                if control.check().is_err() {
+                    return;
+                }
                 let c = unsafe { *bpf20.add(3 * row + 1) } as i32;
                 let r = unsafe { *bpf20.add(3 * row) } as i32;
                 mark_pix(&mut bad_pixels, &mut bad_pixel_vec, c, r, cs, rs);
@@ -1051,6 +1068,9 @@ pub unsafe extern "C" fn interpolate_bad_pixels(
         };
         if jbc_ok {
             for row in 0..jbc_rows as usize {
+                if control.check().is_err() {
+                    return;
+                }
                 let c = unsafe { *jbc.add(3 * row + 1) } as i32;
                 let r = unsafe { *jbc.add(3 * row) } as i32;
                 mark_pix(&mut bad_pixels, &mut bad_pixel_vec, c, r, cs, rs);
@@ -1070,15 +1090,24 @@ pub unsafe extern "C" fn interpolate_bad_pixels(
                 hpinfo.as_mut_ptr() as *mut libc::c_void,
             ) != 0
         };
-        if hp_ok {
-            let mut row = hpinfo[1] as i32;
-            while row < rs {
-                let mut col = hpinfo[0] as i32;
-                while col < cs {
-                    mark_pix(&mut bad_pixels, &mut bad_pixel_vec, col, row, cs, rs);
-                    col += hpinfo[2] as i32;
+        if hp_ok
+            && hpinfo[..2].iter().all(|&v| v <= i32::MAX as u32)
+            && hpinfo[2..]
+                .iter()
+                .all(|&v| (1..=i32::MAX as u32).contains(&v))
+        {
+            // Camera metadata must not create a zero/negative stride or an
+            // overflowing final increment. Range stepping bounds both axes.
+            for row in (hpinfo[1] as i32..rs).step_by(hpinfo[3] as usize) {
+                if control.check().is_err() {
+                    return;
                 }
-                row += hpinfo[3] as i32;
+                for col in (hpinfo[0] as i32..cs).step_by(hpinfo[2] as usize) {
+                    if control.check().is_err() {
+                        return;
+                    }
+                    mark_pix(&mut bad_pixels, &mut bad_pixel_vec, col, row, cs, rs);
+                }
             }
         }
     } // colors == 3
@@ -1112,6 +1141,9 @@ pub unsafe extern "C" fn interpolate_bad_pixels(
             let mut row: i32 = -1;
             let mut i: usize = 0;
             while i < bpf23_len as usize {
+                if control.check().is_err() {
+                    return;
+                }
                 let v = unsafe { *bpf23.add(i) } as i32;
                 if row == -1 {
                     row = v;
@@ -1193,6 +1225,9 @@ pub unsafe extern "C" fn interpolate_bad_pixels(
             }
             let mut row = g.ri;
             while row <= g.rf {
+                if control.check().is_err() {
+                    return;
+                }
                 let mut col = g.ci;
                 while col <= g.cf {
                     for r in 0..g.rs {
@@ -1229,6 +1264,9 @@ pub unsafe extern "C" fn interpolate_bad_pixels(
     let mut stat_pass: i32 = 0;
 
     while !bad_pixels.is_empty() {
+        if control.check().is_err() {
+            return;
+        }
         let mut all_four = 0;
         let mut two_linear = 0;
         let mut two_corner = 0;
@@ -1496,6 +1534,15 @@ pub unsafe extern "C" fn apply_wb_color_shading(
     wb: *mut libc::c_char,
     image: *mut x3f_area16_t,
 ) -> libc::c_int {
+    unsafe { apply_wb_color_shading_controlled(x3f, wb, image, Control::none()) }
+}
+
+unsafe fn apply_wb_color_shading_controlled(
+    x3f: *mut x3f_t,
+    wb: *mut libc::c_char,
+    image: *mut x3f_area16_t,
+    control: Control<'_>,
+) -> libc::c_int {
     let img = unsafe { &mut *image };
     let s = match unsafe { get_wb_color_shading(x3f, wb, img.rows as i32, img.columns as i32) } {
         Some(s) => s,
@@ -1530,6 +1577,9 @@ pub unsafe extern "C" fn apply_wb_color_shading(
     data.par_chunks_mut(row_stride)
         .enumerate()
         .for_each(|(row, row_data)| {
+            if control.check().is_err() {
+                return;
+            }
             let row = row as i32;
             for col in 0..cols {
                 let (f_b, f_t) = wb_color_shading_factors(&s, row, col);
@@ -1573,7 +1623,7 @@ pub unsafe extern "C" fn preprocess_data(
     wb: *mut libc::c_char,
     ilevels: *mut x3f_image_levels_t,
 ) -> libc::c_int {
-    unsafe { preprocess_data_impl(x3f, fix_bad, wb, ilevels, None) }
+    unsafe { preprocess_data_impl(x3f, fix_bad, wb, ilevels, None, Control::none()) }
 }
 
 // Provenance belongs to one conversion, never to the C image layout or a
@@ -1584,7 +1634,11 @@ unsafe fn preprocess_data_impl(
     wb: *mut libc::c_char,
     ilevels: *mut x3f_image_levels_t,
     provenance: Option<&mut Option<SensorReliability>>,
+    control: Control<'_>,
 ) -> libc::c_int {
+    if control.check().is_err() {
+        return 0;
+    }
     let mut image: x3f_area16_t = unsafe { std::mem::zeroed() };
     let mut qtop: x3f_area16_t = unsafe { std::mem::zeroed() };
 
@@ -1754,6 +1808,9 @@ unsafe fn preprocess_data_impl(
         let img_data = unsafe { std::slice::from_raw_parts_mut(image.data, total) };
         let colors = colors_in as usize;
         let normalize_row = |row_data: &mut [u16], mut mask: Option<&mut [[u8; 3]]>| {
+            if control.check().is_err() {
+                return;
+            }
             for col in 0..img_cols {
                 let off = img_channels * col;
                 for color in 0..colors {
@@ -1808,6 +1865,9 @@ unsafe fn preprocess_data_impl(
             .par_chunks_mut(img_row_stride)
             .enumerate()
             .for_each(|(row, row_data)| {
+                if control.check().is_err() {
+                    return;
+                }
                 for col in 0..img_cols {
                     let r1_off = q_row_stride * (2 * row) + q_channels * (2 * col);
                     let r2_off = q_row_stride * (2 * row + 1) + q_channels * (2 * col);
@@ -1837,6 +1897,9 @@ unsafe fn preprocess_data_impl(
         let q_data = unsafe { std::slice::from_raw_parts_mut(qtop.data, q_total) };
         let q_cols = qtop.columns as usize;
         q_data.par_chunks_mut(q_row_stride).for_each(|row_data| {
+            if control.check().is_err() {
+                return;
+            }
             for col in 0..q_cols {
                 let idx = q_channels * col;
                 let v = row_data[idx] as f64;
@@ -1851,13 +1914,13 @@ unsafe fn preprocess_data_impl(
             }
         });
         if fix_bad != 0 {
-            unsafe { interpolate_bad_pixels(x3f, &mut qtop, 1) };
+            unsafe { interpolate_bad_pixels_controlled(x3f, &mut qtop, 1, control) };
         }
     }
 
     // WB-conditional radial color shading (Merrill-only; the function
     // returns 0 for non-Merrill bodies, and the caller ignores that).
-    unsafe { apply_wb_color_shading(x3f, wb, &mut image) };
+    unsafe { apply_wb_color_shading_controlled(x3f, wb, &mut image, control) };
 
     // Shading can reach the storage rail even when the sensor did not clip.
     // Denoise or bad-pixel interpolation must not turn that lost measurement
@@ -1870,6 +1933,9 @@ unsafe fn preprocess_data_impl(
             .par_chunks_mut(img_cols)
             .zip(data.par_chunks(img_row_stride))
             .for_each(|(mask_row, row)| {
+                if control.check().is_err() {
+                    return;
+                }
                 for col in 0..img_cols {
                     for c in 0..3 {
                         if row[col * img_channels + c] == u16::MAX {
@@ -1881,14 +1947,14 @@ unsafe fn preprocess_data_impl(
     }
 
     if fix_bad != 0 {
-        unsafe { interpolate_bad_pixels(x3f, &mut image, 3) };
+        unsafe { interpolate_bad_pixels_controlled(x3f, &mut image, 3, control) };
     }
 
     if let Some(output) = provenance {
         *output = reliability;
     }
 
-    1
+    control.check().is_ok() as libc::c_int
 }
 
 // ----------------------------------------------------------------------
@@ -1970,6 +2036,30 @@ pub unsafe extern "C" fn get_conv(
     lut: *mut f64,
     conv_matrix: *mut f64,
 ) -> libc::c_int {
+    unsafe {
+        get_conv_controlled(
+            x3f,
+            encoding,
+            wb,
+            lutsize,
+            max_out,
+            lut,
+            conv_matrix,
+            CINEON.with(|c| c.get()),
+        )
+    }
+}
+
+unsafe fn get_conv_controlled(
+    x3f: *mut x3f_t,
+    encoding: x3f_color_encoding_t,
+    wb: *mut libc::c_char,
+    lutsize: libc::c_int,
+    max_out: u16,
+    lut: *mut f64,
+    conv_matrix: *mut f64,
+    cineon: bool,
+) -> libc::c_int {
     let mut raw_to_xyz = [0.0_f64; 9];
     let mut xyz_to_rgb = [0.0_f64; 9];
     let mut raw_to_rgb = [0.0_f64; 9];
@@ -2021,7 +2111,6 @@ pub unsafe extern "C" fn get_conv(
     // Adobe RGB / ProPhoto RGB *primaries* with the log curve baked in,
     // which is what colour-grading apps expect when paired with the
     // ICC profile whose TRC samples the inverse curve.
-    let cineon = CINEON.with(|c| c.get());
     let cineon_scale = if cineon { cineon_scale_from_env() } else { 0.0 };
     match encoding {
         x3f_color_encoding_e_SRGB => unsafe {
@@ -2307,6 +2396,30 @@ pub unsafe extern "C" fn convert_data(
     apply_sgain: libc::c_int,
     wb: *mut libc::c_char,
 ) -> libc::c_int {
+    unsafe {
+        convert_data_controlled(
+            x3f,
+            image,
+            ilevels,
+            encoding,
+            apply_sgain,
+            wb,
+            Control::none(),
+            CINEON.with(|c| c.get()),
+        )
+    }
+}
+
+unsafe fn convert_data_controlled(
+    x3f: *mut x3f_t,
+    image: *mut x3f_area16_t,
+    ilevels: *mut x3f_image_levels_t,
+    encoding: x3f_color_encoding_t,
+    apply_sgain: libc::c_int,
+    wb: *mut libc::c_char,
+    control: Control<'_>,
+    cineon: bool,
+) -> libc::c_int {
     let max_out: u16 = 65535; // TODO: should be possible to adjust
 
     let img = unsafe { &mut *image };
@@ -2318,7 +2431,7 @@ pub unsafe extern "C" fn convert_data(
     let mut lut = [0.0_f64; LUTSIZE as usize];
 
     if unsafe {
-        get_conv(
+        get_conv_controlled(
             x3f,
             encoding,
             wb,
@@ -2326,6 +2439,7 @@ pub unsafe extern "C" fn convert_data(
             max_out,
             lut.as_mut_ptr(),
             conv_matrix.as_mut_ptr(),
+            cineon,
         )
     } == 0
     {
@@ -2356,11 +2470,8 @@ pub unsafe extern "C" fn convert_data(
         compute_chroma_prior(conv_matrix.as_ptr(), prior.as_mut_ptr());
     }
 
-    // Cineon-log TIFF mode: snapshot the thread-local once so every
-    // downstream decision (CLUT, RepairPix, ConvCtx field population)
-    // reads the same value. Defaults to false for external C callers
-    // that never set the hook, preserving the unchanged pre-cineon path.
-    let cineon = CINEON.with(|c| c.get());
+    // The explicit per-call Cineon option is shared by all downstream
+    // decisions (CLUT, RepairPix, ConvCtx field population).
 
     // Sigma-style chromaticity LUT (production highlight path). Forced
     // off in cineon mode — it bakes scene-derived chroma recovery into
@@ -2369,7 +2480,18 @@ pub unsafe extern "C" fn convert_data(
     let mut use_clut = !cineon && !env_present("X3F_NO_CHROMA_LUT");
     if use_clut {
         unsafe { chroma_lut_init_defaults(&mut clut) };
-        if unsafe { chroma_lut_build_from_image(&mut clut, img, ilevels, prior.as_ptr()) } == 0 {
+        if unsafe {
+            crate::highlight::chroma_lut_build_from_image_masked(
+                &mut clut,
+                img,
+                ilevels,
+                prior.as_ptr(),
+                None,
+                control,
+                true,
+            )
+        } == 0
+        {
             use_clut = false;
         }
     }
@@ -2383,7 +2505,9 @@ pub unsafe extern "C" fn convert_data(
     let mut use_repair = !cineon && env_present("X3F_REPAIR_PIX");
     if use_repair {
         unsafe { repair_pix_init_defaults(&mut repair) };
-        sat_map = unsafe { build_sat_map(img, ilevels, repair.sat_threshold) };
+        sat_map = unsafe {
+            crate::highlight::build_sat_map_controlled(img, ilevels, repair.sat_threshold, control)
+        };
         if sat_map.is_null() {
             use_repair = false;
         } else {
@@ -2444,6 +2568,9 @@ pub unsafe extern "C" fn convert_data(
         // Serial path — `clut_stats` accumulator is not Sync.
         let stats_ptr = &mut clut_stats as *mut _;
         for (row, row_data) in data.chunks_mut(row_stride).enumerate() {
+            if control.check().is_err() {
+                break;
+            }
             unsafe { convert_row(&ctx, row as i32, row_data, stats_ptr) };
         }
     } else {
@@ -2451,6 +2578,9 @@ pub unsafe extern "C" fn convert_data(
         data.par_chunks_mut(row_stride)
             .enumerate()
             .for_each(|(row, row_data)| {
+                if control.check().is_err() {
+                    return;
+                }
                 unsafe { convert_row(&ctx, row as i32, row_data, ptr::null_mut()) };
             });
     }
@@ -2470,7 +2600,7 @@ pub unsafe extern "C" fn convert_data(
     il.white[1] = max_out as u32;
     il.white[2] = max_out as u32;
 
-    1
+    control.check().is_ok() as libc::c_int
 }
 
 // `env_atof` / `env_present` aliases — these helpers live in
@@ -2523,6 +2653,14 @@ fn denoise_scale(intensity: libc::c_int) -> f32 {
 
 #[no_mangle]
 pub unsafe extern "C" fn run_denoising(x3f: *mut x3f_t, intensity: libc::c_int) -> libc::c_int {
+    unsafe { run_denoising_controlled(x3f, intensity, Control::none()) }
+}
+
+unsafe fn run_denoising_controlled(
+    x3f: *mut x3f_t,
+    intensity: libc::c_int,
+    control: Control<'_>,
+) -> libc::c_int {
     let mut original_image: x3f_area16_t = unsafe { std::mem::zeroed() };
     let mut image: x3f_area16_t = unsafe { std::mem::zeroed() };
 
@@ -2559,13 +2697,14 @@ pub unsafe extern "C" fn run_denoising(x3f: *mut x3f_t, intensity: libc::c_int) 
 
     let scale = denoise_scale(intensity);
     unsafe {
-        crate::denoise::denoise_area(
+        crate::denoise::denoise_area_controlled(
             &mut image as *mut x3f_area16_t as *mut crate::quattro::Area16,
             t,
             scale,
+            control,
         )
-    };
-    1
+    }
+    .is_ok() as libc::c_int
 }
 
 #[no_mangle]
@@ -2574,6 +2713,18 @@ pub unsafe extern "C" fn expand_quattro(
     intensity: libc::c_int,
     expanded: *mut x3f_area16_t,
 ) -> libc::c_int {
+    unsafe { expand_quattro_controlled(x3f, intensity, expanded, Control::none()) }
+}
+
+unsafe fn expand_quattro_controlled(
+    x3f: *mut x3f_t,
+    intensity: libc::c_int,
+    expanded: *mut x3f_area16_t,
+    control: Control<'_>,
+) -> libc::c_int {
+    if control.check().is_err() {
+        return 0;
+    }
     let mut image: x3f_area16_t = unsafe { std::mem::zeroed() };
     let mut active: x3f_area16_t = unsafe { std::mem::zeroed() };
     let mut qtop: x3f_area16_t = unsafe { std::mem::zeroed() };
@@ -2584,6 +2735,9 @@ pub unsafe extern "C" fn expand_quattro(
         return 0;
     }
     if unsafe { x3f_image_area(x3f, &mut image) } == 0 {
+        return 0;
+    }
+    if image.columns == 0 || image.rows == 0 {
         return 0;
     }
 
@@ -2624,6 +2778,9 @@ pub unsafe extern "C" fn expand_quattro(
     let bytes = exp.rows as usize * exp.row_stride as usize * std::mem::size_of::<u16>();
     exp.buf = unsafe { libc::malloc(bytes) };
     exp.data = exp.buf as *mut u16;
+    if exp.buf.is_null() {
+        return 0;
+    }
 
     if intensity != 0
         && unsafe {
@@ -2645,40 +2802,33 @@ pub unsafe extern "C" fn expand_quattro(
         }
     }
 
-    let active_ptr = if intensity != 0 {
+    let active_ptr: *mut x3f_area16_t = if intensity != 0 {
         &mut active as *mut _
     } else {
         ptr::null_mut()
     };
-    let active_exp_ptr = if intensity != 0 {
+    let active_exp_ptr: *mut x3f_area16_t = if intensity != 0 {
         &mut active_exp as *mut _
     } else {
         ptr::null_mut()
     };
-    unsafe {
-        // x3f_expand_quattro is exported by quattro.rs as #[no_mangle].
-        // Re-declare with x3f_area16_t (bindgen) signature; layout
-        // matches quattro.rs's #[repr(C)] Area16 struct exactly. The
-        // trailing `scale` carries the 0..1 NLM-sigma attenuation the
-        // two Quattro NLM passes apply (see denoise_scale).
-        extern "C" {
-            fn x3f_expand_quattro(
-                image: *mut x3f_area16_t,
-                active: *mut x3f_area16_t,
-                qtop: *mut x3f_area16_t,
-                expanded: *mut x3f_area16_t,
-                active_exp: *mut x3f_area16_t,
-                scale: f32,
-            );
-        }
-        x3f_expand_quattro(
-            &mut image,
-            active_ptr,
-            &mut qtop_crop,
-            expanded,
-            active_exp_ptr,
+    let result = unsafe {
+        crate::quattro::expand_quattro_controlled(
+            (&mut image as *mut x3f_area16_t).cast(),
+            active_ptr.cast(),
+            (&mut qtop_crop as *mut x3f_area16_t).cast(),
+            expanded.cast(),
+            active_exp_ptr.cast(),
             denoise_scale(intensity),
-        );
+            control,
+        )
+    };
+    if result.is_err() {
+        unsafe {
+            libc::free((*expanded).buf);
+            *expanded = std::mem::zeroed();
+        }
+        return 0;
     }
     1
 }
@@ -3077,9 +3227,28 @@ pub unsafe extern "C" fn apply_highlight_clip_dng(
 ) {
     let recovery = DNG_HIGHLIGHT_RECOVERY.with(|c| c.get());
     let mapping = DNG_HIGHLIGHT_MAPPING.with(|c| c.get());
-    unsafe {
-        apply_highlight_clip_dng_impl(x3f, image, ilevels, wb, None, recovery, mapping, false)
+    let mut info = ProcessingInfo {
+        highlight_scale: 1.0,
+        shoulder_ceiling: 1.0,
     };
+    unsafe {
+        apply_highlight_clip_dng_impl(
+            x3f,
+            image,
+            ilevels,
+            wb,
+            None,
+            recovery,
+            mapping,
+            false,
+            Control::none(),
+            &mut info,
+            None,
+            true,
+        )
+    };
+    DNG_HIGHLIGHT_SCALE.with(|c| c.set(info.highlight_scale));
+    DNG_SHOULDER_CEILING.with(|c| c.set(info.shoulder_ceiling));
 }
 
 unsafe fn apply_highlight_clip_dng_impl(
@@ -3091,9 +3260,14 @@ unsafe fn apply_highlight_clip_dng_impl(
     recovery: bool,
     mapping: DngMapping,
     already_cropped: bool,
+    control: Control<'_>,
+    info: &mut ProcessingInfo,
+    linear: Option<&mut SceneLinearData>,
+    apply_sgain: bool,
 ) {
-    DNG_HIGHLIGHT_SCALE.with(|c| c.set(1.0));
-    DNG_SHOULDER_CEILING.with(|c| c.set(1.0));
+    if control.check().is_err() {
+        return;
+    }
     if image.is_null() || ilevels.is_null() {
         return;
     }
@@ -3128,7 +3302,7 @@ unsafe fn apply_highlight_clip_dng_impl(
     let mut conv_matrix = [0.0_f64; 9];
     let mut lut_dummy = [0.0_f64; LUTSIZE as usize];
     if unsafe {
-        get_conv(
+        get_conv_controlled(
             x3f,
             x3f_color_encoding_e_SRGB,
             wb,
@@ -3136,6 +3310,7 @@ unsafe fn apply_highlight_clip_dng_impl(
             65535,
             lut_dummy.as_mut_ptr(),
             conv_matrix.as_mut_ptr(),
+            false,
         )
     } == 0
     {
@@ -3143,21 +3318,31 @@ unsafe fn apply_highlight_clip_dng_impl(
     }
 
     let mut sgain: [x3f_spatial_gain_corr_t; MAX_CORR] = unsafe { std::mem::zeroed() };
-    let sgain_num = unsafe { x3f_get_spatial_gain(x3f, wb, sgain.as_mut_ptr()) };
+    let sgain_num = if apply_sgain {
+        unsafe { x3f_get_spatial_gain(x3f, wb, sgain.as_mut_ptr()) }
+    } else {
+        0
+    };
     let mut hp: highlight_params_t = unsafe { std::mem::zeroed() };
     let mut prior = [0.0; 3];
     unsafe {
         get_highlight_params(x3f, &mut hp);
         compute_chroma_prior(conv_matrix.as_ptr(), prior.as_mut_ptr());
     }
-    let no_chroma = env_present("X3F_NO_CHROMA_LUT");
-    let cap = env_atof("X3F_CHROMA_LUT_CAP").filter(|v| v.is_finite() && *v > 0.0);
+    // Editor preparation is controlled by its own options, not process-wide
+    // research overrides. Keep the legacy environment contract unchanged.
+    let no_chroma = linear.is_none() && env_present("X3F_NO_CHROMA_LUT");
+    let cap = if linear.is_none() {
+        env_atof("X3F_CHROMA_LUT_CAP").filter(|v| v.is_finite() && *v > 0.0)
+    } else {
+        None
+    };
     let mut local = provenance.and_then(|mask| {
         if mask.rows != rows || mask.cols != cols {
             return None;
         }
         let source = unsafe { std::slice::from_raw_parts(img.data, total) };
-        LocalRecovery::build(
+        LocalRecovery::build_controlled(
             mask,
             |row, col| {
                 let off = row * stride + col * channels;
@@ -3166,6 +3351,7 @@ unsafe fn apply_highlight_clip_dng_impl(
                 })
             },
             cap,
+            control,
         )
     });
     if let Some(model) = local.as_mut() {
@@ -3175,7 +3361,7 @@ unsafe fn apply_highlight_clip_dng_impl(
     let mut clut: chroma_lut_t = unsafe { std::mem::zeroed() };
     let mut use_clut = recovery && !no_chroma;
     if use_clut {
-        unsafe { chroma_lut_init_defaults(&mut clut) };
+        crate::highlight::chroma_lut_defaults(&mut clut, linear.is_none());
         let source_mask = local.as_ref().filter(|model| model.has_camera_maps());
         use_clut = unsafe {
             crate::highlight::chroma_lut_build_from_image_masked(
@@ -3184,24 +3370,34 @@ unsafe fn apply_highlight_clip_dng_impl(
                 il,
                 prior.as_ptr(),
                 source_mask,
+                control,
+                linear.is_none(),
             )
         } != 0;
     }
     let mut stats: chroma_lut_apply_stats_t = unsafe { std::mem::zeroed() };
-    let trace = env_present("X3F_CHROMA_LUT_TRACE");
+    let trace = linear.is_none() && env_present("X3F_CHROMA_LUT_TRACE");
     let mut repair: repair_pix_t = unsafe { std::mem::zeroed() };
     let mut sat_map = ptr::null_mut();
-    let mut use_repair = recovery && env_present("X3F_REPAIR_PIX");
+    let mut use_repair = linear.is_none() && recovery && env_present("X3F_REPAIR_PIX");
     if use_repair {
         unsafe { repair_pix_init_defaults(&mut repair) };
-        sat_map = unsafe { build_sat_map(img, il, repair.sat_threshold) };
+        sat_map = unsafe {
+            crate::highlight::build_sat_map_controlled(img, il, repair.sat_threshold, control)
+        };
         use_repair = !sat_map.is_null();
         repair.valid = use_repair as i32;
     }
-    let gate_thr = env_atof("X3F_GATE_THR")
+    let gate_thr = linear
+        .is_none()
+        .then(|| env_atof("X3F_GATE_THR"))
+        .flatten()
         .filter(|v| v.is_finite())
         .unwrap_or(0.20);
-    let gate_width = env_atof("X3F_GATE_WIDTH")
+    let gate_width = linear
+        .is_none()
+        .then(|| env_atof("X3F_GATE_WIDTH"))
+        .flatten()
         .filter(|v| v.is_finite())
         .unwrap_or(0.30)
         .max(1e-6);
@@ -3279,10 +3475,43 @@ unsafe fn apply_highlight_clip_dng_impl(
     }
     let mut maximum = 1.0_f64;
     use rayon::prelude::*;
-    if recovery {
+    if let Some(linear) = linear {
+        // Reuse sensor reconstruction, but never pass editor data through the
+        // DNG's pixel normalization, image-maximum scaling or u16 encoding.
+        let length = rows.checked_mul(cols).and_then(|n| n.checked_mul(3));
+        if let Some(length) = length.filter(|&n| linear.data.try_reserve_exact(n).is_ok()) {
+            linear.data.resize(length, 0.0);
+            linear
+                .data
+                .par_chunks_mut(cols * 3)
+                .enumerate()
+                .for_each(|(row, out)| {
+                    if control.check().is_err() {
+                        return;
+                    }
+                    for (col, pixel) in out.chunks_exact_mut(3).enumerate() {
+                        let off = row * stride + col * channels;
+                        let samples = unsafe {
+                            dng_evaluate_pixel(
+                                &ctx,
+                                local.as_ref(),
+                                row,
+                                col,
+                                &data[off..off + 3],
+                                ptr::null_mut(),
+                            )
+                        };
+                        pixel.copy_from_slice(&linear_rgb(&conv_matrix, samples));
+                    }
+                });
+            linear.width = cols as u32;
+            linear.height = rows as u32;
+            linear.camera_to_rgb = conv_matrix;
+        }
+    } else if recovery {
         let evaluate_row = |row: usize, data: &[u16], stats: *mut chroma_lut_apply_stats_t| {
             let mut maximum = 1.0_f64;
-            if row < bounds[0] || row >= bounds[2] {
+            if control.check().is_err() || row < bounds[0] || row >= bounds[2] {
                 return maximum;
             }
             for col in bounds[1]..bounds[3] {
@@ -3314,6 +3543,9 @@ unsafe fn apply_highlight_clip_dng_impl(
         data.par_chunks_mut(stride)
             .enumerate()
             .for_each(|(row, data)| {
+                if control.check().is_err() {
+                    return;
+                }
                 for col in 0..cols {
                     let off = col * channels;
                     if row < bounds[0] || row >= bounds[2] || col < bounds[1] || col >= bounds[3] {
@@ -3343,6 +3575,9 @@ unsafe fn apply_highlight_clip_dng_impl(
         data.par_chunks_mut(stride)
             .enumerate()
             .for_each(|(row, data)| {
+                if control.check().is_err() {
+                    return;
+                }
                 unsafe { dng_encode_off_row(&ctx, row, data) };
             });
     }
@@ -3359,22 +3594,16 @@ unsafe fn apply_highlight_clip_dng_impl(
             local.is_some()
         );
     }
-    // Publish last, after all nested Rayon joins, and snapshot immediately in
-    // x3f-core. A different file can run on this thread while a pass is joined.
-    DNG_HIGHLIGHT_SCALE.with(|c| {
-        c.set(if recovery && mapping == DngMapping::Linear {
-            maximum
-        } else {
-            1.0
-        })
-    });
-    DNG_SHOULDER_CEILING.with(|c| {
-        c.set(if recovery && mapping == DngMapping::Shoulder {
-            maximum
-        } else {
-            1.0
-        })
-    });
+    info.highlight_scale = if recovery && mapping == DngMapping::Linear {
+        maximum
+    } else {
+        1.0
+    };
+    info.shoulder_ceiling = if recovery && mapping == DngMapping::Shoulder {
+        maximum
+    } else {
+        1.0
+    };
 }
 
 fn crop_reliability(
@@ -3467,15 +3696,196 @@ pub unsafe extern "C" fn x3f_get_image(
     fix_bad: libc::c_int,
     denoise: libc::c_int, // 0..=10 denoise intensity (0 = off); see denoise_scale
     apply_sgain: libc::c_int,
-    mut wb: *mut libc::c_char,
+    wb: *mut libc::c_char,
 ) -> libc::c_int {
-    // Snapshot options before preprocessing or denoise can yield this Rayon
-    // worker to another conversion with different thread-local settings.
-    let dng_recovery = DNG_HIGHLIGHT_RECOVERY.with(|c| c.get());
-    let dng_mapping = DNG_HIGHLIGHT_MAPPING.with(|c| c.get());
-    let cineon = CINEON.with(|c| c.get());
-    DNG_HIGHLIGHT_SCALE.with(|c| c.set(1.0));
-    DNG_SHOULDER_CEILING.with(|c| c.set(1.0));
+    let options = ProcessingOptions {
+        dng_highlight_recovery: DNG_HIGHLIGHT_RECOVERY.with(|c| c.get()),
+        dng_shoulder: DNG_HIGHLIGHT_MAPPING.with(|c| c.get()) == DngMapping::Shoulder,
+        cineon: CINEON.with(|c| c.get()),
+    };
+    match unsafe {
+        get_image_controlled(
+            x3f,
+            image,
+            ilevels,
+            encoding,
+            crop,
+            fix_bad,
+            denoise,
+            apply_sgain,
+            wb,
+            options,
+            Control::none(),
+        )
+    } {
+        Ok(info) => {
+            DNG_HIGHLIGHT_SCALE.with(|c| c.set(info.highlight_scale));
+            DNG_SHOULDER_CEILING.with(|c| c.set(info.shoulder_ceiling));
+            1
+        }
+        Err(_) => 0,
+    }
+}
+
+/// Options passed directly to one image processing operation.
+#[derive(Clone, Copy, Default)]
+pub struct ProcessingOptions {
+    pub dng_highlight_recovery: bool,
+    pub dng_shoulder: bool,
+    pub cineon: bool,
+}
+
+/// Encoding metadata belonging to the returned image, never to a worker thread.
+pub struct ProcessingInfo {
+    pub highlight_scale: f64,
+    pub shoulder_ceiling: f64,
+}
+
+/// Owned, active-area, unrotated extended-linear sRGB with as-shot WB and ISO.
+#[derive(Default)]
+pub struct SceneLinearData {
+    pub data: Vec<f32>,
+    pub width: u32,
+    pub height: u32,
+    pub camera_to_rgb: [f64; 9],
+}
+
+#[inline]
+fn linear_rgb(matrix: &[f64; 9], samples: [f64; 3]) -> [f32; 3] {
+    mat3x1_mul_native(matrix, samples).map(|value| value as f32)
+}
+
+/// Prepare one freshly decoded reader; the sensor pipeline consumes its data.
+/// # Safety
+/// `x3f` must uniquely own loaded CAMF, property and decoded RAW sections.
+pub unsafe fn get_scene_linear_controlled(
+    x3f: *mut x3f_t,
+    fix_bad: bool,
+    denoise: u8,
+    apply_sgain: bool,
+    recovery: bool,
+    control: Control<'_>,
+) -> crate::Result<SceneLinearData> {
+    control.check()?;
+    if x3f.is_null() {
+        return Err(crate::Error::InvalidData("missing processing image"));
+    }
+    let mut area: x3f_area16_t = unsafe { std::mem::zeroed() };
+    let mut levels: x3f_image_levels_t = unsafe { std::mem::zeroed() };
+    let mut info = ProcessingInfo {
+        highlight_scale: 1.0,
+        shoulder_ceiling: 1.0,
+    };
+    let mut output = SceneLinearData::default();
+    let ok = unsafe {
+        get_image_impl(
+            x3f,
+            &mut area,
+            &mut levels,
+            x3f_color_encoding_e_NONE,
+            1,
+            fix_bad as i32,
+            denoise.min(10) as i32,
+            apply_sgain as i32,
+            ptr::null_mut(),
+            ProcessingOptions {
+                dng_highlight_recovery: recovery,
+                ..ProcessingOptions::default()
+            },
+            control,
+            &mut info,
+            Some(&mut output),
+        )
+    };
+    // As in get_image_controlled, the area owns the processed allocation;
+    // the reader no longer owns this buffer after preprocessing.
+    unsafe {
+        libc::free(area.buf);
+    }
+    control.check()?;
+    if ok == 0 || output.data.is_empty() || output.data.iter().any(|v| !v.is_finite()) {
+        return Err(crate::Error::InvalidData(
+            "could not prepare finite scene-linear image",
+        ));
+    }
+    Ok(output)
+}
+
+/// Process a distinct reader with explicit per-call options and cancellation.
+///
+/// # Safety
+/// Inputs obey the same ownership and valid image contracts as `x3f_get_image`.
+pub unsafe fn get_image_controlled(
+    x3f: *mut x3f_t,
+    image: *mut x3f_area16_t,
+    ilevels: *mut x3f_image_levels_t,
+    encoding: x3f_color_encoding_t,
+    crop: libc::c_int,
+    fix_bad: libc::c_int,
+    denoise: libc::c_int,
+    apply_sgain: libc::c_int,
+    wb: *mut libc::c_char,
+    options: ProcessingOptions,
+    control: Control<'_>,
+) -> crate::Result<ProcessingInfo> {
+    control.check()?;
+    if x3f.is_null() || image.is_null() {
+        return Err(crate::Error::InvalidData("missing processing image"));
+    }
+    let mut info = ProcessingInfo {
+        highlight_scale: 1.0,
+        shoulder_ceiling: 1.0,
+    };
+    let ok = unsafe {
+        get_image_impl(
+            x3f,
+            image,
+            ilevels,
+            encoding,
+            crop,
+            fix_bad,
+            denoise,
+            apply_sgain,
+            wb,
+            options,
+            control,
+            &mut info,
+            None,
+        )
+    };
+    if ok == 0 || control.check().is_err() {
+        unsafe {
+            libc::free((*image).buf);
+            (*image).buf = ptr::null_mut();
+        }
+        control.check()?;
+        return Err(crate::Error::InvalidData("could not process image"));
+    }
+    Ok(info)
+}
+
+unsafe fn get_image_impl(
+    x3f: *mut x3f_t,
+    image: *mut x3f_area16_t,
+    ilevels: *mut x3f_image_levels_t,
+    encoding: x3f_color_encoding_t,
+    crop: libc::c_int,
+    fix_bad: libc::c_int,
+    denoise: libc::c_int,
+    apply_sgain: libc::c_int,
+    mut wb: *mut libc::c_char,
+    options: ProcessingOptions,
+    control: Control<'_>,
+    info: &mut ProcessingInfo,
+    linear: Option<&mut SceneLinearData>,
+) -> libc::c_int {
+    let dng_recovery = options.dng_highlight_recovery;
+    let dng_mapping = if options.dng_shoulder {
+        DngMapping::Shoulder
+    } else {
+        DngMapping::Linear
+    };
+    let cineon = options.cineon;
     if wb.is_null() {
         wb = unsafe { x3f_get_wb(x3f) };
     }
@@ -3533,15 +3943,20 @@ pub unsafe extern "C" fn x3f_get_image(
             wb,
             &mut il,
             if capture { Some(&mut provenance) } else { None },
+            control,
         )
     } == 0
     {
         return 0;
     }
 
-    let mut is_quattro = false;
+    let mut qtop: x3f_area16_t = unsafe { std::mem::zeroed() };
+    let is_quattro = unsafe { x3f_image_area_qtop(x3f, &mut qtop) } != 0;
     let mut expanded: x3f_area16_t = unsafe { std::mem::zeroed() };
-    if unsafe { expand_quattro(x3f, denoise, &mut expanded) } != 0 {
+    if is_quattro {
+        if unsafe { expand_quattro_controlled(x3f, denoise, &mut expanded, control) } == 0 {
+            return 0;
+        }
         // NOTE: expand_quattro destroys the data of original_image
         if crop == 0
             || unsafe {
@@ -3557,8 +3972,11 @@ pub unsafe extern "C" fn x3f_get_image(
             unsafe { *image = expanded };
         }
         original_image = expanded;
-        is_quattro = true;
-    } else if denoise != 0 && unsafe { run_denoising(x3f, denoise) } == 0 {
+    } else if denoise != 0 && unsafe { run_denoising_controlled(x3f, denoise, control) } == 0 {
+        return 0;
+    }
+
+    if control.check().is_err() {
         return 0;
     }
 
@@ -3568,8 +3986,9 @@ pub unsafe extern "C" fn x3f_get_image(
     // Keep its recovery-off path unchanged, including spatial gain.
     // Cineon-log callers using `-color none` need the log curve without
     // the DNG highlight pass.
-    let applied_dng =
-        encoding == x3f_color_encoding_e_NONE && !cineon && (!is_quattro || dng_recovery);
+    let applied_dng = encoding == x3f_color_encoding_e_NONE
+        && !cineon
+        && (!is_quattro || dng_recovery || linear.is_some());
     if applied_dng {
         let current = unsafe { &*image };
         let already_cropped = current.data != original_image.data
@@ -3577,6 +3996,7 @@ pub unsafe extern "C" fn x3f_get_image(
             || current.columns != original_image.columns;
         let provenance =
             provenance.and_then(|mask| crop_reliability(mask, &original_image, unsafe { &*image }));
+        let spatial_gain = linear.is_none() || apply_sgain != 0;
         unsafe {
             apply_highlight_clip_dng_impl(
                 x3f,
@@ -3587,28 +4007,35 @@ pub unsafe extern "C" fn x3f_get_image(
                 dng_recovery,
                 dng_mapping,
                 already_cropped,
+                control,
+                info,
+                linear,
+                spatial_gain,
             )
         };
     }
 
     if encoding != x3f_color_encoding_e_NONE
-        && unsafe { convert_data(x3f, &mut original_image, &mut il, encoding, apply_sgain, wb) }
-            == 0
+        && unsafe {
+            convert_data_controlled(
+                x3f,
+                &mut original_image,
+                &mut il,
+                encoding,
+                apply_sgain,
+                wb,
+                control,
+                cineon,
+            )
+        } == 0
     {
-        unsafe { libc::free((*image).buf) };
         return 0;
     }
 
     if !ilevels.is_null() {
         unsafe { *ilevels = il };
     }
-    if !applied_dng {
-        // Nested conversions can publish another image's metadata while this
-        // worker joins. Outputs without DNG recovery have no encoding scale.
-        DNG_HIGHLIGHT_SCALE.with(|c| c.set(1.0));
-        DNG_SHOULDER_CEILING.with(|c| c.set(1.0));
-    }
-    1
+    control.check().is_ok() as libc::c_int
 }
 
 #[no_mangle]
@@ -3650,16 +4077,52 @@ pub unsafe fn x3f_get_preview_with_scale(
     preview: *mut x3f_area8_t,
     exposure_scale: f64,
 ) -> libc::c_int {
+    unsafe {
+        get_preview_controlled(
+            x3f,
+            image,
+            ilevels,
+            encoding,
+            apply_sgain,
+            wb,
+            max_width,
+            preview,
+            exposure_scale,
+            Control::none(),
+        )
+    }
+}
+
+/// Preview rendering with a cancellation token local to its conversion.
+/// # Safety
+/// Pointer and ownership requirements match `x3f_get_preview_with_scale`.
+pub unsafe fn get_preview_controlled(
+    x3f: *mut x3f_t,
+    image: *mut x3f_area16_t,
+    ilevels: *mut x3f_image_levels_t,
+    encoding: x3f_color_encoding_t,
+    apply_sgain: libc::c_int,
+    wb: *mut libc::c_char,
+    max_width: u32,
+    preview: *mut x3f_area8_t,
+    exposure_scale: f64,
+    control: Control<'_>,
+) -> libc::c_int {
     let max_out: u16 = 255;
     let img = unsafe { &mut *image };
-    if img.channels < 3 {
+    if control.check().is_err()
+        || img.channels < 3
+        || max_width == 0
+        || img.columns == 0
+        || img.rows == 0
+    {
         return 0;
     }
 
     let mut conv_matrix = [0.0_f64; 9];
     let mut lut = [0.0_f64; LUTSIZE as usize];
     if unsafe {
-        get_conv(
+        get_conv_controlled(
             x3f,
             encoding,
             wb,
@@ -3667,6 +4130,7 @@ pub unsafe fn x3f_get_preview_with_scale(
             max_out,
             lut.as_mut_ptr(),
             conv_matrix.as_mut_ptr(),
+            false,
         )
     } == 0
     {
@@ -3699,6 +4163,12 @@ pub unsafe fn x3f_get_preview_with_scale(
 
     let bytes = pv.rows as usize * pv.row_stride as usize;
     let alloc = unsafe { libc::malloc(bytes) };
+    if alloc.is_null() {
+        unsafe {
+            x3f_cleanup_spatial_gain(sgain.as_mut_ptr(), sgain_num);
+        }
+        return 0;
+    }
     pv.buf = alloc;
     pv.data = alloc as *mut u8;
 
@@ -3709,6 +4179,15 @@ pub unsafe fn x3f_get_preview_with_scale(
     let il = unsafe { &*ilevels };
 
     for row in 0..pv.rows as i32 {
+        if control.check().is_err() {
+            unsafe {
+                x3f_cleanup_spatial_gain(sgain.as_mut_ptr(), sgain_num);
+                libc::free(pv.buf);
+            }
+            pv.buf = ptr::null_mut();
+            pv.data = ptr::null_mut();
+            return 0;
+        }
         for col in 0..pv.columns as i32 {
             let mut input = [0.0_f64; 3];
             for color in 0..3 {
@@ -3900,6 +4379,99 @@ mod tests {
         color_temp_gains, intermediate_levels, interpolate_color_temp_row, preset_gain_invariant,
         shoulder_compress, INTERMEDIATE_UNIT,
     };
+
+    #[test]
+    fn scene_linear_handoff_retains_negative_channels_and_headroom() {
+        use super::*;
+        let mut matrix = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+        let hp = unsafe { std::mem::zeroed::<highlight_params_t>() };
+        let clut = unsafe { std::mem::zeroed::<chroma_lut_t>() };
+        let repair = unsafe { std::mem::zeroed::<repair_pix_t>() };
+        let prior = [1.0; 3];
+        let ctx = DngCtx {
+            sgain: ptr::null_mut(),
+            sgain_num: 0,
+            conv_matrix: matrix.as_mut_ptr(),
+            prior: prior.as_ptr(),
+            hp: &hp,
+            clut: &clut,
+            use_clut: false,
+            repair: &repair,
+            use_repair: false,
+            sat_map: ptr::null(),
+            gate_thr: 0.2,
+            gate_width: 0.3,
+            black: [100.0; 3],
+            white: [1100; 3],
+            rows: 1,
+            cols: 1,
+            channels: 3,
+            recovery: false,
+        };
+        let source = [2100, 600, 0];
+        let sensor = unsafe { dng_evaluate_pixel(&ctx, None, 0, 0, &source, ptr::null_mut()) };
+        assert_eq!(linear_rgb(&matrix, sensor), [2.0, 0.5, -0.1]);
+        let exposure_down = linear_rgb(&matrix, sensor).map(|v| v * 0.25);
+        assert_eq!(exposure_down, [0.5, 0.125, -0.025]);
+        // The existing DNG path deliberately has a different bounded encoding.
+        let mut encoded = source;
+        unsafe { dng_encode_off_row(&ctx, 0, &mut encoded) };
+        assert_eq!(encoded, [1100, 350, 50]);
+    }
+
+    #[test]
+    fn highlight_pixel_patterns_reject_invalid_coordinates_and_strides() {
+        use crate::*;
+
+        let render = |mut pattern: [u32; 4]| {
+            let mut pixels = [10u16; 3 * 3 * 3];
+            pixels[12..15].fill(1000);
+            unsafe {
+                let mut dimensions: [camf_dim_entry_t; 2] = std::mem::zeroed();
+                dimensions[0].size = 2;
+                dimensions[1].size = 2;
+                let mut entry: camf_entry_t = std::mem::zeroed();
+                entry.id = u32::from_le_bytes(*b"CMbM");
+                entry.name_address = c"HighlightPixelsInfo".as_ptr() as *mut _;
+                entry.matrix_dim = 2;
+                entry.matrix_dim_entry = dimensions.as_mut_ptr();
+                entry.matrix_elements = 4;
+                entry.matrix_decoded_type = matrix_type_t_M_UINT;
+                entry.matrix_decoded = pattern.as_mut_ptr().cast();
+                let mut section: x3f_directory_entry_t = std::mem::zeroed();
+                section.header.identifier = u32::from_le_bytes(*b"SECc");
+                section.header.data_subsection.camf.entry_table.element = &mut entry;
+                section.header.data_subsection.camf.entry_table.size = 1;
+                let mut x3f: x3f_t = std::mem::zeroed();
+                x3f.directory_section.directory_entry = &mut section;
+                x3f.directory_section.num_directory_entries = 1;
+                let mut image = x3f_area16_t {
+                    data: pixels.as_mut_ptr(),
+                    buf: std::ptr::null_mut(),
+                    rows: 3,
+                    columns: 3,
+                    channels: 3,
+                    row_stride: 9,
+                };
+                super::interpolate_bad_pixels(&mut x3f, &mut image, 3);
+            }
+            pixels
+        };
+
+        for axis in 0..2 {
+            for invalid in [0, i32::MAX as u32 + 1, u32::MAX] {
+                let mut pattern = [1, 1, 2, 2];
+                pattern[axis + 2] = invalid;
+                assert_eq!(&render(pattern)[12..15], &[1000; 3]);
+            }
+            let mut pattern = [1, 1, 2, 2];
+            pattern[axis] = u32::MAX;
+            assert_eq!(&render(pattern)[12..15], &[1000; 3]);
+        }
+        // A valid large step must stop at the image edge without signed overflow.
+        assert_eq!(render([1, 1, i32::MAX as u32, i32::MAX as u32]), [10; 27]);
+        assert_eq!(render([1, 1, 2, 2]), [10; 27]);
+    }
 
     #[test]
     fn uniform_digital_gain_preserves_intermediate_levels() {
