@@ -416,12 +416,79 @@ pub unsafe extern "C" fn x3f_get_gain(
         unsafe { x3f_3x1_comp_mul(gain_fact.as_mut_ptr(), gain, gain) };
     }
 
+    // Per-model white-balance correction for the TRUE II bodies (see
+    // `true2_gain_correction`).
+    let mut cammodel: *mut libc::c_char = ptr::null_mut();
+    if unsafe { x3f_get_prop_entry(x3f, c"CAMMODEL".as_ptr() as *mut _, &mut cammodel) } != 0 {
+        let model = unsafe { CStr::from_ptr(cammodel) }.to_bytes();
+        if let Some(k) = true2_gain_correction(model) {
+            let g = unsafe { std::slice::from_raw_parts_mut(gain, 3) };
+            for c in 0..3 {
+                g[c] *= k[c];
+            }
+        }
+    }
+
     unsafe {
         x3f_printf(x3f_verbosity_t_DEBUG, c"gain\n".as_ptr());
         x3f_3x1_print(x3f_verbosity_t_DEBUG, gain);
     }
 
     1
+}
+
+/// White-balance gain multiplier for the 2010-11 TRUE II bodies.
+///
+/// With the CAMF gains (`AutoWBGain` × `TempGainFact`) taken literally, the
+/// DP1X, DP2X and SD15 render with a heavy green cast in every DNG reader
+/// and in the TIFF/JPEG paths: neutral objects come out with ~7 % too
+/// little red. The camera JPEG and Adobe's own X3F support for these
+/// bodies both apply more red gain. The per-model factors below were fitted
+/// on 2026-09-21 against Adobe DNG Converter output for 36 DP2X, 20 DP1X and
+/// 15 SD15 files (all Auto WB; per-file scatter 1.4-2.6 %). They are
+/// applied to every preset's gain so the as-shot neutral and the
+/// calibration-illuminant neutral move together. DP1S, DP2 (TRUE I) and
+/// later bodies were checked and need no correction.
+fn true2_gain_correction(model: &[u8]) -> Option<[f64; 3]> {
+    match model {
+        b"SIGMA DP2X" => Some([1.068, 1.0, 1.010]),
+        b"SIGMA DP1X" => Some([1.091, 1.0, 1.005]),
+        b"SIGMA SD15" => Some([1.082, 1.0, 1.022]),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod true2_gain_tests {
+    use super::true2_gain_correction;
+
+    #[test]
+    fn only_true2_bodies_are_corrected() {
+        assert!(true2_gain_correction(b"SIGMA DP2X").is_some());
+        assert!(true2_gain_correction(b"SIGMA DP1X").is_some());
+        assert!(true2_gain_correction(b"SIGMA SD15").is_some());
+        for other in [
+            &b"SIGMA DP2"[..],
+            b"SIGMA DP1S",
+            b"SIGMA SD14",
+            b"SIGMA DP2 Merrill",
+            b"SIGMA dp2 Quattro",
+            b"",
+        ] {
+            assert!(true2_gain_correction(other).is_none(), "{other:?}");
+        }
+    }
+
+    #[test]
+    fn corrections_add_red_and_leave_green_alone() {
+        for k in [b"SIGMA DP2X".as_slice(), b"SIGMA DP1X", b"SIGMA SD15"]
+            .map(|m| true2_gain_correction(m).unwrap())
+        {
+            assert_eq!(k[1], 1.0);
+            assert!(k[0] > 1.05 && k[0] < 1.10);
+            assert!(k[2] >= 1.0 && k[2] < 1.03);
+        }
+    }
 }
 
 #[no_mangle]
