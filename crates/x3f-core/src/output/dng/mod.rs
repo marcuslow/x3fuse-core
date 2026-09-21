@@ -4,7 +4,8 @@
 //!
 //! ```text
 //! TIFF header (II + magic + IFD0-offset)
-//! Preview strip bytes               (8-bit RGB, downsampled to 300 px wide)
+//! Preview strip bytes               (baseline JPEG from the camera's embedded JPEG,
+//!                                     ≤1600 px long edge; 8-bit RGB fallback, 300 px wide)
 //! Raw strip bytes                    (16-bit RGB, full resolution; optional lossless JPEG)
 //! ExtraCameraProfiles blob           (concatenated MMCR mini-TIFFs)
 //! IFD1 (raw) — external values + body
@@ -33,6 +34,7 @@ mod hue_sat_map;
 mod ljpeg;
 mod metadata;
 mod opcodes;
+mod preview;
 mod profiles;
 mod strip;
 pub(crate) mod tags;
@@ -46,6 +48,7 @@ use std::path::Path;
 use crate::{Error, Image, ProcessOptions, Reader};
 
 use color::ColorCalibration;
+use preview::PreviewImage;
 use profiles::{build_extra_profiles_blob, srational_from_floats, write_default_profile};
 use tiff_writer::{DirectoryWriter, TiffWriter, Value};
 
@@ -139,15 +142,37 @@ pub(crate) fn write_controlled(
         .map(|(_, _, r, c)| (r, c))
         .unwrap_or((image.rows, image.columns));
 
-    let mut preview_opts = opts.clone();
-    if opts.dng_highlight_recovery {
-        // Recovery has already baked the requested spatial gain into the
-        // raw samples. Preview rendering only restores the exposure scale.
-        preview_opts.apply_sgain = Some(false);
-    }
-    let preview =
-        reader.get_preview_with_control(&image, &preview_opts, PREVIEW_MAX_WIDTH, control)?;
-    let preview_bytes = strip::encode_preview_strip(&preview);
+    // IFD0 preview: the camera's own JPEG rendering, downscaled (see
+    // `preview`). Viewers show this instead of rendering the raw plane at
+    // thumbnail sizes, so it has to look like the camera JPEG, not like a
+    // profile-less dump of the linear data. Fall back to the legacy raw-
+    // rendered strip only when the file has no decodable embedded JPEG.
+    let camera_preview = reader
+        .dng_thumb_jpeg_bytes()
+        .and_then(|jpeg| preview::from_camera_jpeg(&jpeg, preview::MAX_LONG_EDGE));
+    let preview = match camera_preview {
+        Some(jpeg) => PreviewImage::Jpeg(jpeg),
+        None => {
+            let mut preview_opts = opts.clone();
+            if opts.dng_highlight_recovery {
+                // Recovery has already baked the requested spatial gain into the
+                // raw samples. Preview rendering only restores the exposure scale.
+                preview_opts.apply_sgain = Some(false);
+            }
+            let rendered = reader.get_preview_with_control(
+                &image,
+                &preview_opts,
+                PREVIEW_MAX_WIDTH,
+                control,
+            )?;
+            PreviewImage::Rgb {
+                bytes: strip::encode_preview_strip(&rendered),
+                width: rendered.columns,
+                height: rendered.rows,
+            }
+        }
+    };
+    let preview_bytes = preview.bytes();
     // Lossless JPEG must go out as ONE full-height strip: the dcraw-
     // lineage decoders (LibRaw, and Apple's engine behaves the same)
     // treat a multi-strip LJPEG raw IFD as "first strip, then stop", so
@@ -188,7 +213,7 @@ pub(crate) fn write_controlled(
     let mut tiff = TiffWriter::new(f).map_err(io_err(path))?;
 
     // -- Preview strip data ------------------------------------------
-    let preview_strip_offset = tiff.write_data(&preview_bytes).map_err(io_err(path))?;
+    let preview_strip_offset = tiff.write_data(preview_bytes).map_err(io_err(path))?;
     let preview_strip_bytes = preview_bytes.len() as u32;
 
     // -- Raw strip data (one or many, depending on compression) ------
@@ -376,37 +401,60 @@ fn equalize_levels_controlled(
 }
 
 fn populate_preview_ifd(
-    preview: &crate::Preview,
+    preview: &PreviewImage,
     strip_offset: u32,
     strip_bytes: u32,
     ifd: &mut DirectoryWriter,
     orientation: u16,
 ) {
+    let (width, height) = preview.dimensions();
     ifd.add(
         tags::NEW_SUBFILE_TYPE,
         Value::Long(vec![tags::SUBFILETYPE_REDUCED_IMAGE]),
     );
-    ifd.add(tags::IMAGE_WIDTH, Value::Long(vec![preview.columns]));
-    ifd.add(tags::IMAGE_LENGTH, Value::Long(vec![preview.rows]));
-    ifd.add(
-        tags::BITS_PER_SAMPLE,
-        Value::Short(vec![8; preview.channels as usize]),
-    );
-    ifd.add(
-        tags::COMPRESSION,
-        Value::Short(vec![tags::COMPRESSION_NONE]),
-    );
-    ifd.add(
-        tags::PHOTOMETRIC_INTERPRETATION,
-        Value::Short(vec![tags::PHOTOMETRIC_RGB]),
-    );
+    ifd.add(tags::IMAGE_WIDTH, Value::Long(vec![width]));
+    ifd.add(tags::IMAGE_LENGTH, Value::Long(vec![height]));
+    ifd.add(tags::BITS_PER_SAMPLE, Value::Short(vec![8, 8, 8]));
+    match preview {
+        PreviewImage::Jpeg(_) => {
+            // One baseline JPEG stream in a single strip, the layout Adobe's
+            // DNG Converter uses for its IFD0 preview. YCbCrSubSampling has
+            // to agree with the encoder (4:2:0, see `preview.rs`).
+            ifd.add(
+                tags::COMPRESSION,
+                Value::Short(vec![tags::COMPRESSION_JPEG]),
+            );
+            ifd.add(
+                tags::PHOTOMETRIC_INTERPRETATION,
+                Value::Short(vec![tags::PHOTOMETRIC_YCBCR]),
+            );
+            ifd.add(tags::YCBCR_SUBSAMPLING, Value::Short(vec![2, 2]));
+            ifd.add(
+                tags::YCBCR_POSITIONING,
+                Value::Short(vec![tags::YCBCR_POSITIONING_CENTERED]),
+            );
+            // PreviewColorSpace is a LONG in the DNG spec (exiftool -validate
+            // flags a SHORT as non-standard).
+            ifd.add(
+                tags::PREVIEW_COLOR_SPACE,
+                Value::Long(vec![tags::PREVIEW_COLOR_SPACE_SRGB]),
+            );
+        }
+        PreviewImage::Rgb { .. } => {
+            ifd.add(
+                tags::COMPRESSION,
+                Value::Short(vec![tags::COMPRESSION_NONE]),
+            );
+            ifd.add(
+                tags::PHOTOMETRIC_INTERPRETATION,
+                Value::Short(vec![tags::PHOTOMETRIC_RGB]),
+            );
+        }
+    }
     ifd.add(tags::STRIP_OFFSETS, Value::Long(vec![strip_offset]));
     ifd.add(tags::ORIENTATION, Value::Short(vec![orientation]));
-    ifd.add(
-        tags::SAMPLES_PER_PIXEL,
-        Value::Short(vec![preview.channels as u16]),
-    );
-    ifd.add(tags::ROWS_PER_STRIP, Value::Long(vec![preview.rows]));
+    ifd.add(tags::SAMPLES_PER_PIXEL, Value::Short(vec![3]));
+    ifd.add(tags::ROWS_PER_STRIP, Value::Long(vec![height]));
     ifd.add(tags::STRIP_BYTE_COUNTS, Value::Long(vec![strip_bytes]));
     ifd.add(
         tags::PLANAR_CONFIGURATION,
