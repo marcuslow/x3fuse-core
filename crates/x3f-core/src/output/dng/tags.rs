@@ -26,6 +26,8 @@ pub const PLANAR_CONFIGURATION: u16 = 284;
 pub const SOFTWARE: u16 = 305;
 pub const DATETIME: u16 = 306;
 pub const SUB_IFDS: u16 = 330;
+pub const YCBCR_SUBSAMPLING: u16 = 530;
+pub const YCBCR_POSITIONING: u16 = 531;
 
 // --- EXIF sub-IFD pointer (TIFF private tag) ---------------------------
 
@@ -74,6 +76,11 @@ pub const UNIQUE_CAMERA_MODEL: u16 = 50708;
 pub const DNG_VERSION: u16 = 50706;
 pub const DNG_BACKWARD_VERSION: u16 = 50707;
 pub const EXTRA_CAMERA_PROFILES: u16 = 50933;
+/// DNG 1.2 `PreviewColorSpace` (IFD0 preview): 2 = sRGB.
+pub const PREVIEW_COLOR_SPACE: u16 = 50970;
+pub const PREVIEW_COLOR_SPACE_SRGB: u32 = 2;
+/// `YCbCrPositioning` value 1 = centered (JFIF convention).
+pub const YCBCR_POSITIONING_CENTERED: u16 = 1;
 pub const AS_SHOT_PROFILE_NAME: u16 = 50934;
 pub const PROFILE_NAME: u16 = 50936;
 pub const PROFILE_HUE_SAT_MAP_DIMS: u16 = 50937;
@@ -96,6 +103,7 @@ pub const DEFAULT_USER_CROP: u16 = 51125;
 // --- TIFF Photometric values -------------------------------------------
 
 pub const PHOTOMETRIC_RGB: u16 = 2;
+pub const PHOTOMETRIC_YCBCR: u16 = 6;
 pub const PHOTOMETRIC_LINEAR_RAW: u16 = 34892;
 
 // --- Compression values ------------------------------------------------
@@ -105,6 +113,9 @@ pub const COMPRESSION_NONE: u16 = 1;
 /// (ITU-T T.81 process 14) — the only compression the spec allows for
 /// 16-bit integer raw data.
 pub const COMPRESSION_LOSSLESS_JPEG: u16 = 7;
+/// Same TIFF code as [`COMPRESSION_LOSSLESS_JPEG`]; for an 8-bit YCbCr IFD0
+/// preview it means an ordinary baseline JPEG stream.
+pub const COMPRESSION_JPEG: u16 = 7;
 
 // --- Orientation values ------------------------------------------------
 
