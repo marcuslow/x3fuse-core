@@ -3686,7 +3686,7 @@ pub unsafe extern "C" fn x3f_get_preview(
     encoding: x3f_color_encoding_t,
     apply_sgain: libc::c_int,
     wb: *mut libc::c_char,
-    max_width: u32,
+    min_width: u32,
     preview: *mut x3f_area8_t,
 ) -> libc::c_int {
     unsafe {
@@ -3697,7 +3697,7 @@ pub unsafe extern "C" fn x3f_get_preview(
             encoding,
             apply_sgain,
             wb,
-            max_width,
+            min_width,
             preview,
             1.0,
         )
@@ -3713,7 +3713,7 @@ pub unsafe fn x3f_get_preview_with_scale(
     encoding: x3f_color_encoding_t,
     apply_sgain: libc::c_int,
     wb: *mut libc::c_char,
-    max_width: u32,
+    min_width: u32,
     preview: *mut x3f_area8_t,
     exposure_scale: f64,
 ) -> libc::c_int {
@@ -3756,7 +3756,30 @@ pub unsafe fn x3f_get_preview_with_scale(
         0
     };
 
-    let reduction = ((img.columns + max_width - 1) / max_width) as usize;
+    // Integer box-filter reduction chosen so the preview is at least
+    // `min_width` wide (floor, never below 1). The legacy Kalpanika rule
+    // was ceil(columns / max_width), which capped the preview *under* the
+    // requested width (300 -> 272-294 px).
+    // Size against the ActiveImageArea, not the raw sensor width: Quattro
+    // raws carry wide borders that the crop below removes, and sizing on the
+    // uncropped width left the cropped preview under `min_width`.
+    let mut active: [u32; 4] = [0; 4];
+    let base_columns = if unsafe {
+        x3f_get_camf_rect(
+            x3f,
+            c"ActiveImageArea".as_ptr() as *mut _,
+            image,
+            1,
+            active.as_mut_ptr(),
+        )
+    } != 0
+        && active[2] >= active[0]
+    {
+        active[2] - active[0] + 1
+    } else {
+        img.columns
+    };
+    let reduction = (base_columns / min_width).max(1) as usize;
     let reduction2 = (reduction * reduction) as f64;
     let pv = unsafe { &mut *preview };
     pv.columns = img.columns / reduction as u32;

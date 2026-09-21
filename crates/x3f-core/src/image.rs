@@ -188,14 +188,15 @@ impl Reader {
         })
     }
 
-    /// Render an 8-bit downsampled preview of `image`. `max_width` caps the
-    /// output dimensions (the legacy DNG writer uses 300). `image` must have
+    /// Render an 8-bit downsampled preview of `image`, reduced by the largest
+    /// integer factor that keeps it at least `min_width` wide (the DNG writer
+    /// uses 640; the legacy Kalpanika writer capped it at 300). `image` must have
     /// been produced by [`Self::get_image`] so its `levels` are populated.
     pub fn get_preview(
         &self,
         image: &Image,
         opts: &ProcessOptions,
-        max_width: u32,
+        min_width: u32,
     ) -> Result<Preview, Error> {
         let cwb = wb_cstring(opts.wb.as_deref())?;
         let sgain = self.resolve_sgain(opts.apply_sgain);
@@ -228,7 +229,7 @@ impl Reader {
                 sys::x3f_color_encoding_e_SRGB,
                 sgain,
                 cwb_ptr(&cwb),
-                max_width,
+                min_width,
                 &mut preview,
                 image.dng_highlight_scale,
             )

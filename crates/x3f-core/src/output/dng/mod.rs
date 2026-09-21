@@ -50,7 +50,10 @@ use profiles::{build_extra_profiles_blob, srational_from_floats, write_default_p
 use tiff_writer::{DirectoryWriter, TiffWriter, Value};
 
 const ROWS_PER_STRIP: u32 = 32;
-const PREVIEW_MAX_WIDTH: u32 = 300;
+// Minimum width of the IFD0 rendered preview. Finder, Quick Look and Photos
+// show this at thumbnail sizes; 640 lands at 660-690 px on every Foveon body
+// (integer reduction of the sensor width) for about 0.9 MB uncompressed.
+const PREVIEW_MIN_WIDTH: u32 = 640;
 
 /// Write `reader`'s processed image to `path` as a DNG file.
 ///
@@ -125,7 +128,7 @@ pub fn write(reader: &Reader, path: impl AsRef<Path>, opts: &ProcessOptions) -> 
         // raw samples. Preview rendering only restores the exposure scale.
         preview_opts.apply_sgain = Some(false);
     }
-    let preview = reader.get_preview(&image, &preview_opts, PREVIEW_MAX_WIDTH)?;
+    let preview = reader.get_preview(&image, &preview_opts, PREVIEW_MIN_WIDTH)?;
     let preview_bytes = strip::encode_preview_strip(&preview);
     // Lossless JPEG must go out as ONE full-height strip: the dcraw-
     // lineage decoders (LibRaw, and Apple's engine behaves the same)
