@@ -20,10 +20,6 @@ tiff = "0.10"
 # every DNG reader decodes — see output/dng/mod.rs), so its encode is
 # a single serial task.
 rayon = "1.10"
-# IFD0 preview: decode the camera's embedded JPEG and re-encode it
-# downscaled (output/dng/preview.rs). Both are pure Rust.
-zune-jpeg = "0.4"
-jpeg-encoder = "0.6"
 
 [lints]
 workspace = true
