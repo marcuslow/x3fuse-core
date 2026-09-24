@@ -418,13 +418,23 @@ pub unsafe extern "C" fn x3f_get_gain(
 
     // Per-model white-balance correction for the TRUE II bodies (see
     // `true2_gain_correction`).
-    let mut cammodel: *mut libc::c_char = ptr::null_mut();
-    if unsafe { x3f_get_prop_entry(x3f, c"CAMMODEL".as_ptr() as *mut _, &mut cammodel) } != 0 {
-        let model = unsafe { CStr::from_ptr(cammodel) }.to_bytes();
-        if let Some(k) = true2_gain_correction(model) {
-            let g = unsafe { std::slice::from_raw_parts_mut(gain, 3) };
+    if let Some(model) = unsafe { camera_model(x3f) } {
+        let g = unsafe { std::slice::from_raw_parts_mut(gain, 3) };
+        if let Some(k) = true2_gain_correction(&model) {
             for c in 0..3 {
                 g[c] *= k[c];
+            }
+        }
+        // The TRUE II colour correction shifts white; absorb that shift
+        // here so `x3f_get_bmt_to_xyz` can keep a white-preserving matrix
+        // (see `true2_corrected_bmt`).
+        if let Some(cc) = true2_color_correction(&model) {
+            let mut base = [0.0_f64; 9];
+            if unsafe { bmt_to_xyz_base(x3f, wb, base.as_mut_ptr()) } != 0 {
+                let (_, u) = true2_corrected_bmt(&base, &cc);
+                for c in 0..3 {
+                    g[c] /= u[c];
+                }
             }
         }
     }
@@ -491,8 +501,9 @@ mod true2_gain_tests {
     }
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn x3f_get_bmt_to_xyz(
+/// Balanced-camera → XYZ (D65) for `wb`, before any per-model colour
+/// correction. See `x3f_get_bmt_to_xyz`.
+unsafe fn bmt_to_xyz_base(
     x3f: *mut x3f_t,
     wb: *mut libc::c_char,
     bmt_to_xyz: *mut f64,
@@ -580,6 +591,161 @@ pub unsafe extern "C" fn x3f_get_bmt_to_xyz(
         x3f_3x3_print(x3f_verbosity_t_DEBUG, bmt_to_xyz);
     }
     1
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn x3f_get_bmt_to_xyz(
+    x3f: *mut x3f_t,
+    wb: *mut libc::c_char,
+    bmt_to_xyz: *mut f64,
+) -> libc::c_int {
+    if unsafe { bmt_to_xyz_base(x3f, wb, bmt_to_xyz) } == 0 {
+        return 0;
+    }
+    if let Some(c) = unsafe { camera_model(x3f) }.and_then(|m| true2_color_correction(&m)) {
+        let base: [f64; 9] = unsafe { std::slice::from_raw_parts(bmt_to_xyz, 9) }
+            .try_into()
+            .unwrap();
+        let (corrected, _) = true2_corrected_bmt(&base, &c);
+        unsafe { std::slice::from_raw_parts_mut(bmt_to_xyz, 9) }.copy_from_slice(&corrected);
+        unsafe {
+            x3f_printf(
+                x3f_verbosity_t_DEBUG,
+                c"bmt_to_xyz (TRUE II colour correction)\n".as_ptr(),
+            );
+            x3f_3x3_print(x3f_verbosity_t_DEBUG, bmt_to_xyz);
+        }
+    }
+    1
+}
+
+/// `CAMMODEL` property of the file, if present.
+unsafe fn camera_model(x3f: *mut x3f_t) -> Option<Vec<u8>> {
+    let mut cammodel: *mut libc::c_char = ptr::null_mut();
+    if unsafe { x3f_get_prop_entry(x3f, c"CAMMODEL".as_ptr() as *mut _, &mut cammodel) } != 0 {
+        Some(unsafe { CStr::from_ptr(cammodel) }.to_bytes().to_vec())
+    } else {
+        None
+    }
+}
+
+/// Per-model XYZ (D50) colour correction for the 2010-11 TRUE II bodies,
+/// applied after Sigma's per-shot colour matrix.
+///
+/// Sigma's `sRGB→XYZ × CCMatrix` chain leaves these bodies with muted skin
+/// and a slight green bias compared with Adobe's own X3F support, which
+/// Marcus prefers. The matrices below were fitted on 2026-09-24 (fork only,
+/// never upstream) so that `C × ForwardMatrix` reproduces Adobe DNG
+/// Converter 18.3 colours in CIELAB (ΔE94, chroma-weighted) over 50 DP2X,
+/// 40 DP1X and 40 SD15 Auto-WB files. On held-out files the error on
+/// saturated colours fell from 2.4 to 1.9 (DP2X), 1.9 to 1.7 (DP1X) and
+/// 2.4 to 1.6 (SD15). A matrix is enough: root-polynomial terms gained
+/// nothing further.
+///
+/// `C` does not preserve white. Its white shift is moved into the
+/// white-balance gain (see `true2_corrected_bmt`), so the DNG
+/// ForwardMatrix still maps a balanced neutral to D50 and
+/// `AsShotNeutral` carries the corrected neutral.
+fn true2_color_correction(model: &[u8]) -> Option<[f64; 9]> {
+    match model {
+        b"SIGMA DP2X" => Some([
+            1.0174, 0.0291, -0.0438, -0.0386, 1.0626, -0.0308, -0.0419, 0.0357, 1.0290,
+        ]),
+        b"SIGMA DP1X" => Some([
+            1.0371, -0.0146, -0.0172, 0.0348, 0.9773, -0.0026, -0.0456, 0.0231, 1.0398,
+        ]),
+        b"SIGMA SD15" => Some([
+            1.0314, -0.0182, -0.0081, 0.0501, 0.9322, 0.0306, -0.1272, 0.0863, 1.0489,
+        ]),
+        _ => None,
+    }
+}
+
+/// Apply a D50-space colour correction `c` to a balanced→XYZ(D65) matrix.
+///
+/// Returns the corrected matrix and the per-channel factor `u` it absorbed:
+/// `corrected = T × base × diag(u)` with `T = B⁻¹ × c × B` (B = Bradford
+/// D65→D50) and `u` chosen so `corrected × (1,1,1) = base × (1,1,1)`.
+/// Dividing the white-balance gain by `u` keeps every raw pixel's final
+/// colour equal to `T × base × (gain ∘ raw)`.
+fn true2_corrected_bmt(base: &[f64; 9], c: &[f64; 9]) -> ([f64; 9], [f64; 3]) {
+    let mut b = [0.0_f64; 9];
+    let mut b_inv = [0.0_f64; 9];
+    let mut tmp = [0.0_f64; 9];
+    let mut t = [0.0_f64; 9];
+    let mut tb = [0.0_f64; 9];
+    let mut tb_inv = [0.0_f64; 9];
+    let mut c = *c;
+    let mut base_m = *base;
+    unsafe {
+        x3f_Bradford_D65_to_D50(b.as_mut_ptr());
+        x3f_3x3_inverse(b.as_mut_ptr(), b_inv.as_mut_ptr());
+        x3f_3x3_3x3_mul(c.as_mut_ptr(), b.as_mut_ptr(), tmp.as_mut_ptr());
+        x3f_3x3_3x3_mul(b_inv.as_mut_ptr(), tmp.as_mut_ptr(), t.as_mut_ptr());
+        x3f_3x3_3x3_mul(t.as_mut_ptr(), base_m.as_mut_ptr(), tb.as_mut_ptr());
+        x3f_3x3_inverse(tb.as_mut_ptr(), tb_inv.as_mut_ptr());
+    }
+    let white: [f64; 3] = std::array::from_fn(|r| (0..3).map(|k| base[3 * r + k]).sum());
+    let u: [f64; 3] = std::array::from_fn(|r| (0..3).map(|k| tb_inv[3 * r + k] * white[k]).sum());
+    let corrected = std::array::from_fn(|i| tb[i] * u[i % 3]);
+    (corrected, u)
+}
+
+#[cfg(test)]
+mod true2_color_tests {
+    use super::*;
+
+    const BASE: [f64; 9] = [
+        0.8484, -0.7781, 0.8939, -0.7182, 2.094, -0.3757, 0.5568, -2.794, 3.0626,
+    ];
+
+    #[test]
+    fn corrected_matrix_keeps_the_white_point() {
+        let c = true2_color_correction(b"SIGMA DP2X").unwrap();
+        let (m, _) = true2_corrected_bmt(&BASE, &c);
+        for r in 0..3 {
+            let a: f64 = (0..3).map(|k| BASE[3 * r + k]).sum();
+            let b: f64 = (0..3).map(|k| m[3 * r + k]).sum();
+            assert!((a - b).abs() < 1e-9, "row {r}: {a} vs {b}");
+        }
+    }
+
+    #[test]
+    fn gain_division_preserves_pixel_colour() {
+        let c = true2_color_correction(b"SIGMA SD15").unwrap();
+        let (m, u) = true2_corrected_bmt(&BASE, &c);
+        let px = [0.3, 0.5, 0.2];
+        let mut bm = [0.0; 9];
+        let mut bi = [0.0; 9];
+        let mut cc = c;
+        let mut tmp = [0.0; 9];
+        let mut t = [0.0; 9];
+        unsafe {
+            x3f_Bradford_D65_to_D50(bm.as_mut_ptr());
+            x3f_3x3_inverse(bm.as_mut_ptr(), bi.as_mut_ptr());
+            x3f_3x3_3x3_mul(cc.as_mut_ptr(), bm.as_mut_ptr(), tmp.as_mut_ptr());
+            x3f_3x3_3x3_mul(bi.as_mut_ptr(), tmp.as_mut_ptr(), t.as_mut_ptr());
+        }
+        let base_xyz: [f64; 3] =
+            std::array::from_fn(|r| (0..3).map(|k| BASE[3 * r + k] * px[k]).sum());
+        let want: [f64; 3] =
+            std::array::from_fn(|r| (0..3).map(|k| t[3 * r + k] * base_xyz[k]).sum());
+        let got: [f64; 3] =
+            std::array::from_fn(|r| (0..3).map(|k| m[3 * r + k] * px[k] / u[k]).sum());
+        for i in 0..3 {
+            assert!((want[i] - got[i]).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn only_true2_bodies_get_colour_correction() {
+        for m in [&b"SIGMA DP2X"[..], b"SIGMA DP1X", b"SIGMA SD15"] {
+            assert!(true2_color_correction(m).is_some());
+        }
+        for m in [&b"SIGMA DP2"[..], b"SIGMA DP1S", b"SIGMA dp2 Quattro", b""] {
+            assert!(true2_color_correction(m).is_none());
+        }
+    }
 }
 
 #[no_mangle]
